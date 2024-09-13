@@ -1,0 +1,8 @@
+numpy==1.26.1
+torch==2.1.0
+torchvision==0.16.0
+matplotlib
+datasets
+torchinfo
+pytorch_benchmarks @ git+https://github.com/eml-eda/pytorch-benchmarks.git@8737cf7a8e50f5191219c105f96a188b63ca98de
+plinio @ git+https://github.com/eml-eda/plinio.git@2e1a4353d7ce16106e91f9a6ac5991a1a7eed46a

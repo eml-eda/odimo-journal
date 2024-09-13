@@ -162,3 +162,5 @@ cython_debug/
 #.idea/
 
 venv_diana
+darkside_venv
+unit_test
