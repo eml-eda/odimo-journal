@@ -20,7 +20,7 @@
 import argparse
 import pathlib
 import random
-from typing import Dict, Union, Optional
+from typing import Dict, Union, Optional, Tuple
 import warnings
 
 import numpy as np
@@ -31,12 +31,79 @@ import torch.utils
 import torchvision
 import torchvision.transforms as transforms
 
-from plinio.cost import params
+from plinio.cost import params as pit_params
 from plinio.methods import PIT
 
-from pytorch_benchmarks.utils import AverageMeter, accuracy, EarlyStopping, CheckPoint
+from pytorch_benchmarks.utils import AverageMeter, accuracy, CheckPoint
 
+from models import hw_models as hw
+from models import quant_module_pow2 as qm2
 from models import quantres20_fp_foldbn
+from models import utils
+from models.quant_resnet import ResNet20
+
+
+def _build_quantized_model(
+    fp_model: nn.Module,
+    num_channels: Dict[str, Tuple[int, int]],
+) -> nn.Module:
+    archas, archws = [[7]] * 22, [[8]] * 22
+    s_up = 5.0
+    q_model = ResNet20(
+        qm2.QuantMultiPrecActivConv2d,
+        hw.diana(analog_speedup=s_up),
+        archws,
+        archas,
+        qtz_fc="multi",
+        bn=False,
+        target="latency",
+        **{},
+    )
+
+    # Remove input and output channels from q_model following `num_channels`
+    for name, module in q_model.named_modules():
+        if name in map(
+            # lambda x: ".mix_weight".join(x.rsplit(".conv", 1)),
+            lambda x: "".join(x.rsplit(".conv", 1)),
+            list(num_channels.keys()),
+        ):
+            # c_in = num_channels[name.replace(".mix_weight", ".conv")][0]
+            # c_out = num_channels[name.replace(".mix_weight", ".conv")][1]
+            c_in = num_channels[name + ".conv"][0]
+            c_out = num_channels[name + ".conv"][1]
+
+            module.ch_in = c_in
+            module.ch_out = c_out
+
+            module.mix_weight.cout = c_out
+            with torch.no_grad():
+                module.mix_weight.alpha_weight = nn.Parameter(
+                    module.mix_weight.alpha_weight[:, :c_out]
+                )
+
+            module.mix_weight.mix_weight[0].cout = c_out
+            module.mix_weight.mix_bias[0].cout = c_out
+
+            module.mix_weight.conv.out_channels = c_out
+            module.mix_weight.conv.in_channels = c_in
+            # Update the weight and bias tensor
+            with torch.no_grad():
+                module.mix_weight.conv.weight = nn.Parameter(
+                    module.mix_weight.conv.weight[
+                        : module.mix_weight.conv.out_channels,
+                        : module.mix_weight.conv.in_channels,
+                    ]
+                )
+                module.mix_weight.conv.bias = nn.Parameter(
+                    module.mix_weight.conv.bias[: module.mix_weight.conv.out_channels]
+                )
+
+    q_state_dict = utils.fpfold_to_q(fp_model.state_dict())
+    q_model.load_state_dict(q_state_dict, strict=False)
+
+    utils.init_scale_param(q_model)
+
+    return q_model
 
 
 def _evaluate(
@@ -65,16 +132,24 @@ def _evaluate(
     return final_metrics
 
 
+def _extract_num_channels(model: nn.Module) -> Dict[str, Tuple[int, int]]:
+    num_channels = {}
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            num_channels[name] = (module.in_channels, module.out_channels)
+        if isinstance(module, nn.Linear):
+            num_channels[name] = (module.in_features, module.out_features)
+    return num_channels
+
+
 def _train_one_epoch(
-    search: bool,
     model: nn.Module,
     criterion: nn.Module,
     net_optimizer: torch.optim.Optimizer,
-    arch_optimizer: Optional[torch.optim.Optimizer],
+    q_optimizer: Optional[torch.optim.Optimizer],
     train: torch.utils.data.DataLoader,
     val: torch.utils.data.DataLoader,
     device: torch.device,
-    strength: float = 0.0,
 ) -> Dict[str, float]:
     model.train()
     avgacc = AverageMeter("6.2f")
@@ -85,15 +160,11 @@ def _train_one_epoch(
         sample, target = sample.to(device), target.to(device)
         output = model(sample)
         loss = criterion(output, target)
-        if search:
-            loss = loss + strength * model.cost
         net_optimizer.zero_grad()
-        if arch_optimizer is not None:
-            arch_optimizer.zero_grad()
+        q_optimizer.zero_grad()
         loss.backward()
         net_optimizer.step()
-        if arch_optimizer is not None:
-            arch_optimizer.step()
+        q_optimizer.step()
         acc_val = accuracy(output, target, topk=(1,))
         avgacc.update(acc_val[0], sample.size(0))
         avgloss.update(loss, sample.size(0))
@@ -108,49 +179,36 @@ def _train_one_epoch(
 
 
 def _train_loop(
-    search: bool,
     model: Union[PIT, nn.Module],
     train_loader: torch.utils.data.DataLoader,
     val_loader: torch.utils.data.DataLoader,
     test_loader: torch.utils.data.DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
-    arch_optimizer: Optional[torch.optim.Optimizer],
+    q_optimizer: Optional[torch.optim.Optimizer],
     scheduler: torch.optim.lr_scheduler._LRScheduler,
+    q_scheduler: torch.optim.lr_scheduler._LRScheduler,
     epochs: int,
-    strength: float = 0.0,
     save_dir: pathlib.Path = pathlib.Path("."),
 ):
-    save_dir = save_dir / "search" if search else save_dir / "finetune"
+    save_dir = save_dir / "qtz"
     save_dir.mkdir(parents=True, exist_ok=True)
     cp = CheckPoint(save_dir, model, optimizer, mode="max", save_best_only=True)
-    early_stopping = EarlyStopping(
-        patience=20 if search else epochs,
-        mode="max",
-    )
 
     for epoch in range(epochs):
         model.train()
         train_metr = _train_one_epoch(
-            search,
             model,
             criterion,
             optimizer,
-            arch_optimizer,
+            q_optimizer,
             train_loader,
             val_loader,
             "cuda",
-            strength=strength,
         )
         print(f"Epoch {epoch}/{epochs}: {train_metr}")
         scheduler.step()
-        if search:
-            print(f"Cost after epoch {epoch}: {model.cost}")
-            if not model.discrete_cost:
-                model.discrete_cost = True
-                print(f"Discrete cost after epoch {epoch}: {model.cost}")
-                model.discrete_cost = False
-            print(f"Model: {model.summary()}")
+        q_scheduler.step()
 
         test_metr = _evaluate(model, criterion, test_loader, "cuda")
         print(f"Test metrics: {test_metr}")
@@ -158,23 +216,11 @@ def _train_loop(
         # Save best model on val
         if epoch > 10:
             cp(epoch, train_metr["val_acc"])
-            if early_stopping(train_metr["val_acc"]):
-                print("Early Stopping!")
-                break
     cp.load_best()
     test_metr_final = _evaluate(model, criterion, test_loader, "cuda")
     print(f"Final test metrics: {test_metr_final}")
 
-    if search:
-        print(f"Cost final: {model.cost}")
-        if not model.discrete_cost:
-            model.discrete_cost = True
-            print(f"Discrete cost final: {model.cost}")
-            model.discrete_cost = False
-        print(f"Final model: {model.summary()}")
-        cp.save(save_dir / "best_search.ckp")
-    else:
-        cp.save(save_dir / "best_finetune.ckp")
+    cp.save(save_dir / "best_quantized.ckp")
 
 
 def main(args: argparse.Namespace):
@@ -253,7 +299,7 @@ def main(args: argparse.Namespace):
         num_classes=num_classes,
         fine_tune=True,
     )
-    pit_model = PIT(model, input_shape=(3, 32, 32), cost=params, discrete_cost=True)
+    pit_model = PIT(model, input_shape=(3, 32, 32), cost=pit_params, discrete_cost=True)
     pit_model = pit_model.to("cuda")
     print(f"Cost before pruning: {pit_model.cost}")
 
@@ -263,66 +309,76 @@ def main(args: argparse.Namespace):
     )
     print(f"Pre-search evaluation: {pre_search_eval}")
 
+    # Load search checkpoint
+    search_sd = torch.load(args.data / "search" / "best_search.ckp")["model_state_dict"]
+    pit_model.load_state_dict(search_sd)
+    print(f"Cost after loading search checkpoint: {pit_model.cost}")
+
+    # Export the model and load fine-tuning checkpoint
+    discovered_model = pit_model.cpu().export()
+    finetune_sd = torch.load(args.data / "finetune" / "best_finetune.ckp")[
+        "model_state_dict"
+    ]
+    discovered_model.load_state_dict(finetune_sd)
+
+    # Evaluate the discovered model
+    discovered_model = discovered_model.to("cuda")
+    post_ft_eval = _evaluate(
+        discovered_model, nn.CrossEntropyLoss().to("cuda"), test_loader, "cuda"
+    )
+    print(f"Post-fine-tuning evaluation: {post_ft_eval}")
+
+    # Extract the number of channels/features for every layer
+    num_channels = _extract_num_channels(discovered_model)
+
+    # Build the quantized model and test it
+    q_model = _build_quantized_model(discovered_model, num_channels)
+    q_model = q_model.to("cuda")
+    q_model_eval = _evaluate(
+        q_model, nn.CrossEntropyLoss().to("cuda"), test_loader, "cuda"
+    )
+    # Get model complexity
+    cycles, _, _ = q_model.fetch_arch_info()
+    print(f"Model complexity: {cycles}")
+    print(f"Quantized model evaluation: {q_model_eval}")
+
     criterion = nn.CrossEntropyLoss().to("cuda")
-    # Use same optimizer setup used in ODiMO search phase
-    optimizer = torch.optim.Adam(
-        pit_model.net_parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+
+    # group model/quantization parameters
+    params, q_params = [], []
+    for name, param in q_model.named_parameters():
+        if ("clip_val" in name) or ("scale_param" in name):
+            q_params += [param]
+        else:
+            params += [param]
+
+    optimizer = torch.optim.SGD(
+        params, args.lr, momentum=args.momentum, weight_decay=args.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer,
-        milestones=[100, 150],
-        last_epoch=-1,
-    )
-    arch_optimizer = torch.optim.Adam(
-        pit_model.nas_parameters(),
-        lr=args.lra,
+        optimizer, milestones=[100, 150], last_epoch=-1
     )
 
-    # Search Phase
+    if q_params:
+        q_optimizer = torch.optim.SGD(q_params, args.lrq)
+        q_scheduler = torch.optim.lr_scheduler.StepLR(q_optimizer, 50)
+    else:
+        q_optimizer = None
+        q_scheduler = None
+
+    # Train the quantized model
     _train_loop(
-        True,
-        pit_model,
+        q_model,
         train_loader,
         val_loader,
         test_loader,
         criterion,
         optimizer,
-        arch_optimizer,
+        q_optimizer,
         scheduler,
+        q_scheduler,
         args.epochs,
-        args.strength,
-        pathlib.Path(args.data),
-    )
-
-    # Fine-tuning
-    discovered_model = pit_model.cpu().export()
-    discovered_model = discovered_model.to("cuda")
-    ft_optimizer = torch.optim.SGD(
-        discovered_model.parameters(),
-        lr=args.lrft,
-        momentum=args.momentum,
-        weight_decay=args.weight_decay,
-    )
-    ft_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        ft_optimizer,
-        milestones=[100, 150],
-        last_epoch=-1,
-    )
-    _train_loop(
-        False,
-        discovered_model,
-        train_loader,
-        val_loader,
-        test_loader,
-        criterion,
-        ft_optimizer,
-        None,
-        ft_scheduler,
-        args.epochs,
-        args.strength,
-        pathlib.Path(args.data),
+        args.data,
     )
 
 
@@ -339,7 +395,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lra", default=0.001, type=float)
     parser.add_argument("--lrft", default=0.01, type=float)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--strength", type=float, default=0.0)
     return parser.parse_args()
 
 
