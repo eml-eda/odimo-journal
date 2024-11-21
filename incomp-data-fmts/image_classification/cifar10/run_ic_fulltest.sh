@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 strength=$1
-path="."
+path="/space/risso/odimo_rebuttal/diana"
 
 #arch="res8_fp"
 #arch="res8_w8a8"

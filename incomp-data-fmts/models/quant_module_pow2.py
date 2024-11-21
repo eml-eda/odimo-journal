@@ -28,6 +28,7 @@ from torch.distributions import Normal
 from torch.nn.parameter import Parameter
 
 from .hw_models import DianaPower
+from .model_diana import analog_cycles, digital_cycles
 from . import int_module as im
 from deployment.utils import IntegerizationMode
 
@@ -75,7 +76,7 @@ class _bias_sym_min_max_quantize(torch.autograd.Function):
 # MR
 def _bias_min_max_quantize_common(x, ch_min, ch_max, bit):
     bias_range = ch_max - ch_min
-    n_steps = 2 ** bit - 1
+    n_steps = 2**bit - 1
     S_bias = bias_range / n_steps
     y = (x / S_bias).round() * S_bias
 
@@ -117,7 +118,7 @@ def _channel_min_max_quantize_common(x, ch_min, ch_max, bit):
     if bit != 0:
         ch_range = ch_max - ch_min
         ch_range.masked_fill_(ch_range.eq(0), 1)
-        n_steps = 2 ** bit - 1
+        n_steps = 2**bit - 1
         S_w = ch_range / n_steps
         S_w = S_w.view((x.size(0), 1, 1, 1))
         y = x.div(S_w).round().mul(S_w)
@@ -139,14 +140,16 @@ class _prune_channels(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        sw, = ctx.saved_tensors
+        (sw,) = ctx.saved_tensors
         # Adapt grad_output to the shape of sw
         return grad_output.expand_as(sw)
 
 
 # DJP
-def asymmetric_linear_quantization_scale_factor(num_bits, saturation_min, saturation_max):
-    n = 2 ** num_bits - 1
+def asymmetric_linear_quantization_scale_factor(
+    num_bits, saturation_min, saturation_max
+):
+    n = 2**num_bits - 1
     return n / (saturation_max - saturation_min)
 
 
@@ -177,7 +180,9 @@ def clamp(x, min, max, inplace=False):
 
 @torch.fx.wrap
 def memory_size(in_shape):
-    return torch.tensor(in_shape[1] * in_shape[2] * in_shape[3] * 1e-3, dtype=torch.float)
+    return torch.tensor(
+        in_shape[1] * in_shape[2] * in_shape[3] * 1e-3, dtype=torch.float
+    )
 
 
 @torch.fx.wrap
@@ -192,7 +197,9 @@ class LearnedClippedLinearQuantizeSTE(torch.autograd.Function):
         ctx.save_for_backward(input, clip_val)
         if inplace:
             ctx.mark_dirty(input)
-        scale_factor = asymmetric_linear_quantization_scale_factor(num_bits, 0, clip_val.data[0])
+        scale_factor = asymmetric_linear_quantization_scale_factor(
+            num_bits, 0, clip_val.data[0]
+        )
         if round_pow2:
             scale_factor = torch.exp2(torch.floor(torch.log2(scale_factor)))
             clip_val.data[0] = (2**num_bits - 1) / scale_factor
@@ -211,7 +218,7 @@ class LearnedClippedLinearQuantizeSTE(torch.autograd.Function):
 
         grad_alpha = grad_output.clone()
         grad_alpha.masked_fill_(x.lt(clip_val.data[0]), 0)
-#        grad_alpha[x.lt(clip_val.data[0])] = 0
+        #        grad_alpha[x.lt(clip_val.data[0])] = 0
         grad_alpha = grad_alpha.sum().expand_as(clip_val)
 
         # Straight-through estimator for the scale factor calculation
@@ -220,8 +227,14 @@ class LearnedClippedLinearQuantizeSTE(torch.autograd.Function):
 
 # DJP (w.r.t Manuele's code I changed inplace to false to avoid error)
 class LearnedClippedLinearQuantization(nn.Module):
-    def __init__(self, num_bits, init_act_clip_val=6,
-                 dequantize=True, inplace=False, round_pow2=False):
+    def __init__(
+        self,
+        num_bits,
+        init_act_clip_val=6,
+        dequantize=True,
+        inplace=False,
+        round_pow2=False,
+    ):
         super(LearnedClippedLinearQuantization, self).__init__()
         self.num_bits = num_bits
         self.clip_val = nn.Parameter(torch.Tensor([init_act_clip_val]))
@@ -231,14 +244,20 @@ class LearnedClippedLinearQuantization(nn.Module):
 
     def forward(self, x):
         input = LearnedClippedLinearQuantizeSTE.apply(
-            x, self.clip_val, self.num_bits,
-            self.dequantize, self.inplace, self.round_pow2)
+            x,
+            self.clip_val,
+            self.num_bits,
+            self.dequantize,
+            self.inplace,
+            self.round_pow2,
+        )
         return input
 
     def __repr__(self):
-        inplace_str = ', inplace' if self.inplace else ''
-        return '{0}(num_bits={1}, clip_val={2}{3})'.format(
-            self.__class__.__name__, self.num_bits, self.clip_val, inplace_str)
+        inplace_str = ", inplace" if self.inplace else ""
+        return "{0}(num_bits={1}, clip_val={2}{3})".format(
+            self.__class__.__name__, self.num_bits, self.clip_val, inplace_str
+        )
 
 
 # DJP
@@ -248,7 +267,7 @@ class FQQuantizationSTE(torch.autograd.Function):
         if inplace:
             ctx.mark_dirty(x)
         # Number of positive quantization levels
-        n = 2**(num_bits-1) - 1
+        n = 2 ** (num_bits - 1) - 1
         # Hardtanh
         output = clamp(x, lower_bound, 1, inplace)
         # Multiply by number of levels
@@ -276,13 +295,16 @@ class FQQuantizationSTE(torch.autograd.Function):
 
 # MR (Ref: https://arxiv.org/abs/1912.09356)
 class FQActQuantization(nn.Module):
-    def __init__(self, num_bits, init_scale_param=0.,
-                 train_scale_param=False, inplace=False):
+    def __init__(
+        self, num_bits, init_scale_param=0.0, train_scale_param=False, inplace=False
+    ):
         super().__init__()
         self.num_bits = num_bits
         self.train_scale_param = train_scale_param
         self.n_s = 1  # One scale-param per layer
-        self.scale_param = nn.Parameter(torch.Tensor(self.n_s), requires_grad=train_scale_param)
+        self.scale_param = nn.Parameter(
+            torch.Tensor(self.n_s), requires_grad=train_scale_param
+        )
         # To be compliant with LearnedClippedLinearQuantization where init_clip_val=6
         # we set here scale_param to be ln(6) (6/e^s = 1)
         init_scale_param = math.log(6)
@@ -294,23 +316,26 @@ class FQActQuantization(nn.Module):
         exp_scale_param = torch.exp(self.scale_param)
         x_scaled = x / exp_scale_param.view(self.n_s, 1, 1, 1)
         # Quantize
-        x_q = FQQuantizationSTE.apply(x_scaled, self.num_bits+1, self.inplace, 0)
+        x_q = FQQuantizationSTE.apply(x_scaled, self.num_bits + 1, self.inplace, 0)
         # Multiply by scale factor
         x_deq = x_q * exp_scale_param.view(self.n_s, 1, 1, 1)
         return x_deq
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(num_bits={self.num_bits}, \
-            scale_param={self.scale_param})'
+        return f"{self.__class__.__name__}(num_bits={self.num_bits}, \
+            scale_param={self.scale_param})"
 
 
 class FQConvBiasQuantization(nn.Module):
-    def __init__(self, cout, num_bits, abit, inplace=False, dequantize=True,
-                 round_pow2=False):
+    def __init__(
+        self, cout, num_bits, abit, inplace=False, dequantize=True, round_pow2=False
+    ):
         super().__init__()
         self.cout = cout
         self.num_bits = num_bits
-        self.abit = abit[0]  # TODO: Understand how to manage this stuff if multiple abit allowed
+        self.abit = abit[
+            0
+        ]  # TODO: Understand how to manage this stuff if multiple abit allowed
         self.b_prec = 16
         # self.n_s = 1  # Per-Layer scale-factor
         self.n_s = 1 if num_bits != 2 else cout  # Per-Ch scale factor
@@ -319,9 +344,9 @@ class FQConvBiasQuantization(nn.Module):
         self.round_pow2 = round_pow2
 
     def forward(self, x, w_scale, act_scale):
-        n_w = 2**(self.num_bits - 1) - 1
-        n_a = 2**(self.abit) - 1
-        n_b = 2**(self.b_prec - 1) - 1
+        n_w = 2 ** (self.num_bits - 1) - 1
+        n_a = 2 ** (self.abit) - 1
+        n_b = 2 ** (self.b_prec - 1) - 1
         # Having a positive scale factor is preferable to avoid instabilities
         if self.round_pow2:
             # act_scale_approx = torch.round(torch.log2(act_scale / n_a))
@@ -343,7 +368,7 @@ class FQConvBiasQuantization(nn.Module):
             return n_b * x_q
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(num_bits={self.num_bits})'
+        return f"{self.__class__.__name__}(num_bits={self.num_bits})"
 
 
 class FloorSTE(torch.autograd.Function):
@@ -358,9 +383,17 @@ class FloorSTE(torch.autograd.Function):
 
 # MR (Ref: https://arxiv.org/abs/1912.09356)
 class FQConvWeightQuantization(nn.Module):
-    def __init__(self, cout, k_size, num_bits, init_scale_param=0.,
-                 train_scale_param=False, inplace=False, dequantize=True,
-                 round_pow2=False):
+    def __init__(
+        self,
+        cout,
+        k_size,
+        num_bits,
+        init_scale_param=0.0,
+        train_scale_param=False,
+        inplace=False,
+        dequantize=True,
+        round_pow2=False,
+    ):
         super().__init__()
         self.cout = cout
         self.k_size = k_size
@@ -368,14 +401,16 @@ class FQConvWeightQuantization(nn.Module):
         self.train_scale_param = train_scale_param
         # self.n_s = 1  # Per-Layer scale factor
         self.n_s = 1 if num_bits != 2 else cout  # Per-Ch scale factor
-        self.scale_param = nn.Parameter(torch.Tensor(self.n_s), requires_grad=train_scale_param)
+        self.scale_param = nn.Parameter(
+            torch.Tensor(self.n_s), requires_grad=train_scale_param
+        )
         # Choose s in such a way the [-1, 0, 1] values are equiprobable
-        mu = torch.tensor([0.])
-        std = math.sqrt(2/torch.tensor([self.cout * self.k_size]))
+        mu = torch.tensor([0.0])
+        std = math.sqrt(2 / torch.tensor([self.cout * self.k_size]))
         n = Normal(mu, std)  # mean, std
         # P[x / e^s < -1/2] = p -> P[x < -1/2 * e^s] = p
         # icdf(p) = -1/2 * e^s -> s = ln(-2 * icdf(p))
-        p = torch.tensor([1/(2**num_bits-1)])
+        p = torch.tensor([1 / (2**num_bits - 1)])
         init_scale_param = math.log(-2 * n.icdf(p))
         self.scale_param.data.fill_(init_scale_param)
         self.inplace = inplace
@@ -397,11 +432,11 @@ class FQConvWeightQuantization(nn.Module):
             x_deq = x_q * exp_scale_param.view(self.n_s, 1, 1, 1)
             return x_deq
         else:
-            return x_q * (2**(self.num_bits-1) - 1)
+            return x_q * (2 ** (self.num_bits - 1) - 1)
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(num_bits={self.num_bits}, \
-            scale_param={self.scale_param})'
+        return f"{self.__class__.__name__}(num_bits={self.num_bits}, \
+            scale_param={self.scale_param})"
 
 
 class QuantAdd(nn.Module):
@@ -411,7 +446,7 @@ class QuantAdd(nn.Module):
         # Quantizer activations
         self.abits = abits
 
-        round_pow2 = kwargs.pop('round_pow2', True)  # TODO: in general should be False
+        round_pow2 = kwargs.pop("round_pow2", True)  # TODO: in general should be False
         self.mix_activ = QuantPaCTActiv(abits, round_pow2=round_pow2)
         if clip_val is not None:
             self.mix_activ.mix_activ[0].clip_val = clip_val
@@ -454,8 +489,8 @@ class QuantAvgPool2d(nn.Module):
         super().__init__()
         # Quantizer activations
         self.abits = abits
-        max_inp_val = kwargs.pop('max_inp_val', 6.)
-        round_pow2 = kwargs.pop('round_pow2', True)  # TODO: in general should be False
+        max_inp_val = kwargs.pop("max_inp_val", 6.0)
+        round_pow2 = kwargs.pop("round_pow2", True)  # TODO: in general should be False
         self.mix_activ = QuantPaCTActiv(abits, max_inp_val, round_pow2)
 
         # Pooling
@@ -487,13 +522,14 @@ class QuantAvgPool2d(nn.Module):
         pool = submodule.pool
         if mode is IntegerizationMode.FakeInt:
             new_submodule = im.FakeIntAvgPool2d(
-                n.meta, submodule.abits,
+                n.meta,
+                submodule.abits,
                 kernel_size=pool.kernel_size,
                 stride=pool.stride,
                 padding=pool.padding,
                 ceil_mode=pool.ceil_mode,
                 count_include_pad=pool.count_include_pad,
-                divisor_override=pool.divisor_override
+                divisor_override=pool.divisor_override,
             )
         elif mode is IntegerizationMode.Int:
             new_submodule = im.IntAvgPool2d(
@@ -503,7 +539,7 @@ class QuantAvgPool2d(nn.Module):
                 padding=pool.padding,
                 ceil_mode=pool.ceil_mode,
                 count_include_pad=pool.count_include_pad,
-                divisor_override=pool.divisor_override
+                divisor_override=pool.divisor_override,
             )
 
         mod.add_submodule(str(n.target), new_submodule)
@@ -515,63 +551,70 @@ class QuantMultiPrecActivConv2d(nn.Module):
 
     def __init__(self, inplane, outplane, wbits=None, abits=None, fc=None, **kwargs):
         super().__init__()
-        self.fine_tune = kwargs.pop('fine_tune', False)
-        self.first_layer = kwargs.pop('first_layer', False)
+        self.fine_tune = kwargs.pop("fine_tune", False)
+        self.first_layer = kwargs.pop("first_layer", False)
         self.fc = fc
 
         self.abits = abits
         self.wbits = wbits
 
-        self.search_types = ['fixed', 'mixed', 'multi']
+        self.search_types = ["fixed", "mixed", "multi"]
         if fc in self.search_types:
             self.fc = fc
         else:
             self.fc = False
 
         # max_inp_val = kwargs.pop('max_inp_val', 6.)
-        max_inp_val = kwargs.pop('max_inp_val', 6.)
-        round_pow2 = kwargs.pop('round_pow2', True)  # TODO: in general should be False
+        max_inp_val = kwargs.pop("max_inp_val", 6.0)
+        round_pow2 = kwargs.pop("round_pow2", True)  # TODO: in general should be False
         self.mix_activ = QuantPaCTActiv(abits, max_inp_val, round_pow2)
         # self.mix_activ = QuantFQActiv(abits)
         if not fc:
-            self.mix_weight = QuantMultiPrecConv2d(inplane, outplane, wbits, abits=abits, **kwargs)
+            self.mix_weight = QuantMultiPrecConv2d(
+                inplane, outplane, wbits, abits=abits, **kwargs
+            )
         else:
             # For the final fc layer the pruning bit-width (i.e., 0) makes no sense
             _wbits = copy.deepcopy(wbits)
             if 0 in _wbits:
                 _wbits.remove(0)
             # If the layer is fc we can use:
-            if self.fc == 'fixed':
+            if self.fc == "fixed":
                 # - Fixed quantization on 8bits
                 self.mix_weight = QuantMixChanConv2d(inplane, outplane, 8, **kwargs)
-            elif self.fc == 'mixed':
+            elif self.fc == "mixed":
                 # - Mixed-precision search
-                self.mix_weight = QuantMixChanConv2d(inplane, outplane, _wbits, **kwargs)
-            elif self.fc == 'multi':
+                self.mix_weight = QuantMixChanConv2d(
+                    inplane, outplane, _wbits, **kwargs
+                )
+            elif self.fc == "multi":
                 # - Multi-precision search
                 self.mix_weight = QuantMultiPrecConv2d(
-                    inplane, outplane, _wbits, abits=abits, **kwargs)
+                    inplane, outplane, _wbits, abits=abits, **kwargs
+                )
             else:
-                raise ValueError(f"Unknown fc search, possible values are {self.search_types}")
+                raise ValueError(
+                    f"Unknown fc search, possible values are {self.search_types}"
+                )
 
         # complexities
-        self.stride = kwargs['stride'] if 'stride' in kwargs else 1
-        if isinstance(kwargs['kernel_size'], tuple):
-            kernel_size = kwargs['kernel_size'][0] * kwargs['kernel_size'][1]
-            self.k_x = kwargs['kernel_size'][0]
-            self.k_y = kwargs['kernel_size'][1]
+        self.stride = kwargs["stride"] if "stride" in kwargs else 1
+        if isinstance(kwargs["kernel_size"], tuple):
+            kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
+            self.k_x = kwargs["kernel_size"][0]
+            self.k_y = kwargs["kernel_size"][1]
         else:
-            kernel_size = kwargs['kernel_size'] * kwargs['kernel_size']
-            self.k_x = kwargs['kernel_size']
-            self.k_y = kwargs['kernel_size']
+            kernel_size = kwargs["kernel_size"] * kwargs["kernel_size"]
+            self.k_x = kwargs["kernel_size"]
+            self.k_y = kwargs["kernel_size"]
         self.ch_in = inplane
         self.ch_out = outplane
         self.out_x = None
         self.out_y = None
-        self.param_size = inplane * outplane * kernel_size / kwargs['groups'] * 1e-6
-        self.filter_size = self.param_size / float(self.stride ** 2.0)
-        self.register_buffer('size_product', torch.tensor(0, dtype=torch.float))
-        self.register_buffer('memory_size', torch.tensor(0, dtype=torch.float))
+        self.param_size = inplane * outplane * kernel_size / kwargs["groups"] * 1e-6
+        self.filter_size = self.param_size / float(self.stride**2.0)
+        self.register_buffer("size_product", torch.tensor(0, dtype=torch.float))
+        self.register_buffer("memory_size", torch.tensor(0, dtype=torch.float))
 
     def forward(self, input):
         in_shape = input.shape
@@ -610,7 +653,9 @@ class QuantMultiPrecActivConv2d(nn.Module):
         conv = submodule.mix_weight.conv
         if mode is IntegerizationMode.FakeInt:
             new_submodule = im.FakeIntMultiPrecActivConv2d(
-                n.meta, submodule.abits, submodule.wbits,
+                n.meta,
+                submodule.abits,
+                submodule.wbits,
                 in_channels=conv.in_channels,
                 out_channels=conv.out_channels,
                 kernel_size=conv.kernel_size,
@@ -619,11 +664,13 @@ class QuantMultiPrecActivConv2d(nn.Module):
                 dilation=conv.dilation,
                 groups=conv.groups,
                 bias=False,
-                padding_mode=conv.padding_mode
+                padding_mode=conv.padding_mode,
             )
         elif mode is IntegerizationMode.Int:
             new_submodule = im.IntMultiPrecActivConv2d(
-                n.meta, submodule.abits, submodule.wbits,
+                n.meta,
+                submodule.abits,
+                submodule.wbits,
                 in_channels=conv.in_channels,
                 out_channels=conv.out_channels,
                 kernel_size=conv.kernel_size,
@@ -632,12 +679,14 @@ class QuantMultiPrecActivConv2d(nn.Module):
                 dilation=conv.dilation,
                 groups=conv.groups,
                 bias=False,
-                padding_mode=conv.padding_mode
+                padding_mode=conv.padding_mode,
             )
 
         with torch.no_grad():
             new_submodule.mix_weight.conv.weight.copy_(conv.weight)
-            new_submodule.mix_weight.alpha_weight.copy_(submodule.mix_weight.alpha_weight)
+            new_submodule.mix_weight.alpha_weight.copy_(
+                submodule.mix_weight.alpha_weight
+            )
             # new_submodule.conv.bias.copy_(b)
         mod.add_submodule(str(n.target), new_submodule)
         return
@@ -670,7 +719,9 @@ class QuantFQActiv(nn.Module):
         self.alpha_activ.data.fill_(0.01)
         self.mix_activ = nn.ModuleList()
         for bit in self.bits:
-            self.mix_activ.append(FQActQuantization(num_bits=bit, train_scale_param=True))
+            self.mix_activ.append(
+                FQActQuantization(num_bits=bit, train_scale_param=True)
+            )
 
     def forward(self, input):
         outs = []
@@ -686,7 +737,7 @@ class QuantFQActiv(nn.Module):
 # MR
 class QuantPaCTActiv(nn.Module):
 
-    def __init__(self, bits, max_inp_val=6., round_pow2=False):
+    def __init__(self, bits, max_inp_val=6.0, round_pow2=False):
         super(QuantPaCTActiv, self).__init__()
         if type(bits) == int:
             self.bits = [bits]
@@ -698,9 +749,10 @@ class QuantPaCTActiv(nn.Module):
         self.mix_activ = nn.ModuleList()
         for bit in self.bits:
             self.mix_activ.append(
-                LearnedClippedLinearQuantization(num_bits=bit,
-                                                 init_act_clip_val=max_inp_val,
-                                                 round_pow2=round_pow2))
+                LearnedClippedLinearQuantization(
+                    num_bits=bit, init_act_clip_val=max_inp_val, round_pow2=round_pow2
+                )
+            )
 
     def forward(self, input):
         outs = list()
@@ -743,50 +795,56 @@ class QuantMultiPrecConv2d(nn.Module):
 
     def __init__(self, inplane, outplane, bits, **kwargs):
         super().__init__()
-        self.abits = kwargs.pop('abits', [8])
+        self.abits = kwargs.pop("abits", [8])
         if type(bits) == int:
             self.bits = [bits]
         else:
             self.bits = bits
         self.cout = outplane
-        self.alpha_weight = Parameter(torch.Tensor(len(self.bits), self.cout), requires_grad=False)
+        self.alpha_weight = Parameter(
+            torch.Tensor(len(self.bits), self.cout), requires_grad=False
+        )
         self.alpha_weight.data.fill_(0.01)
 
-        if isinstance(kwargs['kernel_size'], tuple):
-            k_size = kwargs['kernel_size'][0] * kwargs['kernel_size'][1]
+        if isinstance(kwargs["kernel_size"], tuple):
+            k_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
         else:
-            k_size = kwargs['kernel_size'] * kwargs['kernel_size']
+            k_size = kwargs["kernel_size"] * kwargs["kernel_size"]
 
         # Quantizer
         self.mix_weight = nn.ModuleList()
         self.mix_bias = nn.ModuleList()
-        self.train_scale_param = kwargs.pop('train_scale_param', True)
+        self.train_scale_param = kwargs.pop("train_scale_param", True)
         # self.round_pow2 = kwargs.pop('round_pow2', True)  # TODO: False
         # round_pow2 = False if self.bits == [2] else True
         for bit in self.bits:
             round_pow2 = False if bit == 2 else True
             self.mix_weight.append(
                 FQConvWeightQuantization(
-                    outplane, k_size,
+                    outplane,
+                    k_size,
                     num_bits=bit,
                     train_scale_param=self.train_scale_param,
-                    round_pow2=round_pow2))
+                    round_pow2=round_pow2,
+                )
+            )
             self.mix_bias.append(
                 FQConvBiasQuantization(
-                    outplane,
-                    num_bits=bit,
-                    abit=self.abits,
-                    round_pow2=round_pow2))
+                    outplane, num_bits=bit, abit=self.abits, round_pow2=round_pow2
+                )
+            )
 
         self.conv = nn.Conv2d(inplane, outplane, **kwargs)
 
     def forward(self, input, act_scale=None):
         mix_quant_weight = list()
         mix_quant_bias = list()
-        sw = F.one_hot(torch.argmax(self.alpha_weight, dim=0), num_classes=len(self.bits)).t()
+        sw = F.one_hot(
+            torch.argmax(self.alpha_weight, dim=0), num_classes=len(self.bits)
+        ).t()
         conv = self.conv
         weight = conv.weight
-        bias = getattr(conv, 'bias', None)
+        bias = getattr(conv, "bias", None)
         for i, bit in enumerate(self.bits):
             quant_weight = self.mix_weight[i](weight)
             w_scale = self.mix_weight[i].scale_param
@@ -802,23 +860,29 @@ class QuantMultiPrecConv2d(nn.Module):
             mix_quant_bias = None
         mix_quant_weight = sum(mix_quant_weight)
         out = F.conv2d(
-            input, mix_quant_weight, mix_quant_bias, conv.stride,
-            conv.padding, conv.dilation, conv.groups)
+            input,
+            mix_quant_weight,
+            mix_quant_bias,
+            conv.stride,
+            conv.padding,
+            conv.dilation,
+            conv.groups,
+        )
         return out
 
     def store_hardened_weights(self, act_scale):
         mix_quant_weight = list()
         mix_quant_bias = list()
-        sw = F.one_hot(torch.argmax(self.alpha_weight, dim=0),
-                       num_classes=len(self.bits)).t()
+        sw = F.one_hot(
+            torch.argmax(self.alpha_weight, dim=0), num_classes=len(self.bits)
+        ).t()
         conv = self.conv
         weight = conv.weight
-        bias = getattr(conv, 'bias', None)
+        bias = getattr(conv, "bias", None)
         for i, bit in enumerate(self.bits):
             quant_weight = self.mix_weight[i](weight)
             w_scale = self.mix_weight[i].scale_param
-            scaled_quant_weight = quant_weight * \
-                sw[i].view((self.cout, 1, 1, 1))
+            scaled_quant_weight = quant_weight * sw[i].view((self.cout, 1, 1, 1))
             mix_quant_weight.append(scaled_quant_weight)
             if bias is not None:
                 quant_bias = self.mix_bias[i](bias, w_scale, act_scale)
@@ -840,30 +904,36 @@ class QuantMixActivChanConv2d(nn.Module):
         self.wbit = wbits
         self.fc = False
 
-        self.first_layer = kwargs.pop('first_layer', False)
+        self.first_layer = kwargs.pop("first_layer", False)
 
         self.mix_activ = QuantPaCTActiv(abits)
         if not self.fc:
-            self.mix_weight = QuantMixChanConv2d(inplane, outplane, bits=wbits, **kwargs)
+            self.mix_weight = QuantMixChanConv2d(
+                inplane, outplane, bits=wbits, **kwargs
+            )
         else:
             # If the layer is fc we use fixed quantization on 8bits
             self.mix_weight = QuantMixChanConv2d(inplane, outplane, 8, **kwargs)
         # complexities
-        stride = kwargs['stride'] if 'stride' in kwargs else 1
-        if isinstance(kwargs['kernel_size'], tuple):
-            kernel_size = kwargs['kernel_size'][0] * kwargs['kernel_size'][1]
+        stride = kwargs["stride"] if "stride" in kwargs else 1
+        if isinstance(kwargs["kernel_size"], tuple):
+            kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
         else:
-            kernel_size = kwargs['kernel_size'] * kwargs['kernel_size']
-        self.param_size = inplane * outplane * kernel_size / kwargs['groups'] * 1e-6
-        self.filter_size = self.param_size / float(stride ** 2.0)
-        self.register_buffer('size_product', torch.tensor(0, dtype=torch.float))
-        self.register_buffer('memory_size', torch.tensor(0, dtype=torch.float))
+            kernel_size = kwargs["kernel_size"] * kwargs["kernel_size"]
+        self.param_size = inplane * outplane * kernel_size / kwargs["groups"] * 1e-6
+        self.filter_size = self.param_size / float(stride**2.0)
+        self.register_buffer("size_product", torch.tensor(0, dtype=torch.float))
+        self.register_buffer("memory_size", torch.tensor(0, dtype=torch.float))
 
     def forward(self, input):
         in_shape = input.shape
-        tmp = torch.tensor(in_shape[1] * in_shape[2] * in_shape[3] * 1e-3, dtype=torch.float)
+        tmp = torch.tensor(
+            in_shape[1] * in_shape[2] * in_shape[3] * 1e-3, dtype=torch.float
+        )
         self.memory_size.copy_(tmp)
-        tmp = torch.tensor(self.filter_size * in_shape[-1] * in_shape[-2], dtype=torch.float)
+        tmp = torch.tensor(
+            self.filter_size * in_shape[-1] * in_shape[-2], dtype=torch.float
+        )
         self.size_product.copy_(tmp)
         if not self.first_layer:
             out = self.mix_activ(input)
@@ -884,22 +954,22 @@ class FpConv2d(nn.Module):
 
         self.first_layer = first_layer
 
-        self.fine_tune = kwargs.pop('fine_tune', False)
-        self.fc = kwargs.pop('fc', False)
-        kwargs.pop('max_inp_val', 6.)
+        self.fine_tune = kwargs.pop("fine_tune", False)
+        self.fc = kwargs.pop("fc", False)
+        kwargs.pop("max_inp_val", 6.0)
 
         self.conv = nn.Conv2d(inplane, outplane, **kwargs)
         self.relu = nn.ReLU()
         # complexities
-        stride = kwargs['stride'] if 'stride' in kwargs else 1
-        if isinstance(kwargs['kernel_size'], tuple):
-            kernel_size = kwargs['kernel_size'][0] * kwargs['kernel_size'][1]
+        stride = kwargs["stride"] if "stride" in kwargs else 1
+        if isinstance(kwargs["kernel_size"], tuple):
+            kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
         else:
-            kernel_size = kwargs['kernel_size'] * kwargs['kernel_size']
+            kernel_size = kwargs["kernel_size"] * kwargs["kernel_size"]
         self.param_size = inplane * outplane * kernel_size * 1e-6
-        self.filter_size = self.param_size / float(stride ** 2.0)
-        self.register_buffer('size_product', torch.tensor(0, dtype=torch.float))
-        self.register_buffer('memory_size', torch.tensor(0, dtype=torch.float))
+        self.filter_size = self.param_size / float(stride**2.0)
+        self.register_buffer("size_product", torch.tensor(0, dtype=torch.float))
+        self.register_buffer("memory_size", torch.tensor(0, dtype=torch.float))
 
     def forward(self, input):
         in_shape = input.shape
@@ -922,28 +992,35 @@ class QuantMixChanConv2d(nn.Module):
         self.bits = bits
         self.outplane = outplane
 
-        kwargs.pop('alpha_init', None)
+        kwargs.pop("alpha_init", None)
 
-        self.fine_tune = kwargs.pop('fine_tune', False)
+        self.fine_tune = kwargs.pop("fine_tune", False)
         self.conv = nn.Conv2d(inplane, outplane, **kwargs)
 
     def forward(self, input):
         conv = self.conv
-        bias = getattr(conv, 'bias', None)
+        bias = getattr(conv, "bias", None)
         quant_weight = _channel_asym_min_max_quantize.apply(conv.weight, self.bits)
         if bias is not None:
             quant_bias = _bias_sym_min_max_quantize.apply(bias, 32)
         else:
             quant_bias = bias
         out = F.conv2d(
-            input, quant_weight, quant_bias, conv.stride, conv.padding, conv.dilation, conv.groups)
+            input,
+            quant_weight,
+            quant_bias,
+            conv.stride,
+            conv.padding,
+            conv.dilation,
+            conv.groups,
+        )
         return out
 
 
 # DJP
 class MixQuantPaCTActiv(nn.Module):
 
-    def __init__(self, bits, max_inp_val=6., round_pow2=False, gumbel=False):
+    def __init__(self, bits, max_inp_val=6.0, round_pow2=False, gumbel=False):
         super().__init__()
         self.bits = bits
         self.gumbel = gumbel
@@ -952,16 +1029,17 @@ class MixQuantPaCTActiv(nn.Module):
         self.mix_activ = nn.ModuleList()
         for bit in self.bits:
             self.mix_activ.append(
-                LearnedClippedLinearQuantization(num_bits=bit,
-                                                 init_act_clip_val=max_inp_val,
-                                                 round_pow2=round_pow2))
+                LearnedClippedLinearQuantization(
+                    num_bits=bit, init_act_clip_val=max_inp_val, round_pow2=round_pow2
+                )
+            )
 
     def forward(self, input, temp, is_hard):
         outs = list()
         act_scale = list()
         # self.alpha_activ = torch.nn.Parameter(clamp(self.alpha_activ,-100,+100))
         if not self.gumbel:
-            sw = F.softmax(self.alpha_activ/temp, dim=0)
+            sw = F.softmax(self.alpha_activ / temp, dim=0)
         else:
             # If is_hard is True the output is one-hot
             sw = F.gumbel_softmax(self.alpha_activ, tau=temp, hard=is_hard, dim=0)
@@ -977,7 +1055,7 @@ class MixQuantChanConv2d(nn.Module):
 
     def __init__(self, inplane, outplane, bits, **kwargs):
         super(MixQuantChanConv2d, self).__init__()
-        assert not kwargs['bias']
+        assert not kwargs["bias"]
         self.bits = bits
         self.alpha_weight = Parameter(torch.Tensor(len(self.bits)))
         self.alpha_weight.data.fill_(0.01)
@@ -997,8 +1075,14 @@ class MixQuantChanConv2d(nn.Module):
         mix_quant_weight = sum(mix_quant_weight)
         conv = self.conv_list[0]
         out = F.conv2d(
-            input, mix_quant_weight, conv.bias, conv.stride,
-            conv.padding, conv.dilation, conv.groups)
+            input,
+            mix_quant_weight,
+            conv.bias,
+            conv.stride,
+            conv.padding,
+            conv.dilation,
+            conv.groups,
+        )
         return out
 
 
@@ -1006,53 +1090,114 @@ class MixQuantChanConv2d(nn.Module):
 class SharedMixQuantChanConv2d(nn.Module):
 
     def __init__(self, inplane, outplane, bits, gumbel=False, **kwargs):
-        super(SharedMixQuantChanConv2d, self).__init__()
+        super().__init__()
+        self.abits = kwargs.pop("abits", [8])
         self.bits = bits
         self.gumbel = gumbel
-        if isinstance(kwargs['kernel_size'], tuple):
-            kernel_size = kwargs['kernel_size'][0] * kwargs['kernel_size'][1]
-        else:
-            kernel_size = kwargs['kernel_size'] * kwargs['kernel_size']
-        self.param_size = inplane * outplane * kernel_size / kwargs['groups'] * 1e-6
+        self.cout = outplane
+
         self.alpha_weight = Parameter(torch.Tensor(len(self.bits)))
-        self.alpha_init = kwargs.pop('alpha_init', 'same')
-        if self.alpha_init == 'same':
-            self.alpha_weight.data.fill_(0.01)
-        elif self.alpha_init == 'scaled':
+        # Alpha init
+        self.alpha_init = kwargs.pop("alpha_init", "same")
+        if self.alpha_init == "same" or self.alpha_init is None:
+            if self.gumbel:
+                val_equiprob = 1.0 / len(self.bits)
+                init_logit = math.log(val_equiprob / (1 - val_equiprob))
+            else:
+                init_logit = 0.01
+            self.alpha_weight.data.fill_(init_logit)
+        elif self.alpha_init == "scaled":
             max_prec = max(self.bits)
+            scaled_val = torch.tensor([bit / max_prec for bit in self.bits])
+            if self.gumbel:
+                scaled_prob = F.softmax(scaled_val, dim=0)
+                scaled_logit = torch.log(scaled_prob / (1 - scaled_prob))
+            else:
+                scaled_logit = scaled_val
             for i in range(len(self.bits)):
-                self.alpha_weight.data[i].fill_(self.bits[i] / max_prec)
+                self.alpha_weight.data[i].fill_(scaled_logit[i])
+        else:
+            raise ValueError(f"Unknown alpha_init: {self.alpha_init}")
+
+        if isinstance(kwargs["kernel_size"], tuple):
+            kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
+        else:
+            kernel_size = kwargs["kernel_size"] * kwargs["kernel_size"]
+
+        # Quantizer
+        self.mix_weight = nn.ModuleList()
+        self.mix_bias = nn.ModuleList()
+        self.train_scale_param = kwargs.pop("train_scale_param", True)
+        for bit in self.bits:
+            round_pow2 = False if bit == 2 else True
+            self.mix_weight.append(
+                FQConvWeightQuantization(
+                    outplane,
+                    kernel_size,
+                    num_bits=bit,
+                    train_scale_param=self.train_scale_param,
+                    round_pow2=round_pow2,
+                )
+            )
+            self.mix_bias.append(
+                FQConvBiasQuantization(
+                    outplane, num_bits=bit, abit=self.abits, round_pow2=round_pow2
+                )
+            )
+
         self.conv = nn.Conv2d(inplane, outplane, **kwargs)
 
-    def forward(self, input, temp, is_hard):
-        mix_quant_weight = []
-        mix_wbit = 0
-        # self.alpha_weight = torch.nn.Parameter(clamp(self.alpha_weight, -100, +100))
+        if self.gumbel:
+            self.register_buffer(
+                "sw_buffer", torch.zeros(self.alpha_weight.shape, dtype=torch.float)
+            )
+
+    def forward(self, input, temp, is_hard, act_scale=None):
+        mix_quant_weight = list()
+        mix_quant_bias = list()
         if not self.gumbel:
             sw = F.softmax(self.alpha_weight / temp, dim=0)
         else:
             # If is_hard is True the output is one-hot
-            sw = F.gumbel_softmax(self.alpha_weight, tau=temp, hard=is_hard, dim=0)
+            if self.training:  # Used during training
+                sw = F.gumbel_softmax(self.alpha_weight, tau=temp, hard=is_hard, dim=0)
+                self.sw_buffer = sw.clone().detach()
+            else:  # Used during eval
+                sw = self.sw_buffer
+
         conv = self.conv
         weight = conv.weight
-        bias = getattr(conv, 'bias', None)
+        bias = getattr(conv, "bias", None)
         for i, bit in enumerate(self.bits):
-            quant_weight = _channel_asym_min_max_quantize.apply(weight, bit)
-            scaled_quant_weight = quant_weight * sw[i]
+            quant_weight = self.mix_weight[i](weight)
+            w_scale = self.mix_weight[i].scale_param
+            scaled_quant_weight = (
+                quant_weight * sw[i]
+            )  # .view((self.cout, 1, 1, 1)) <- removed wrt SharedMultiPrecConv2d
             mix_quant_weight.append(scaled_quant_weight)
-            # Complexity
-            mix_wbit += sw[i] * bit
-        if bias is not None:
-            quant_bias = _bias_sym_min_max_quantize.apply(bias, 32)
+            if bias is not None:
+                quant_bias = self.mix_bias[i](bias, w_scale, act_scale)
+                scaled_quant_bias = (
+                    quant_bias * sw[i]
+                )  # .view(self.cout) <- removed wrt SharedMultiPrecConv2d
+                mix_quant_bias.append(scaled_quant_bias)
+        if mix_quant_bias:
+            mix_quant_bias = sum(mix_quant_bias)
         else:
-            quant_bias = bias
+            mix_quant_bias = None
+
         mix_quant_weight = sum(mix_quant_weight)
         out = F.conv2d(
-            input, mix_quant_weight, quant_bias, conv.stride,
-            conv.padding, conv.dilation, conv.groups)
-        # Measure weight complexity for reg-loss
-        w_complexity = mix_wbit * self.param_size
-        return out, w_complexity
+            input,
+            mix_quant_weight,
+            mix_quant_bias,
+            conv.stride,
+            conv.padding,
+            conv.dilation,
+            conv.groups,
+        )
+
+        return out
 
 
 # DJP
@@ -1060,69 +1205,72 @@ class SharedMultiPrecConv2d(nn.Module):
 
     def __init__(self, inplane, outplane, bits, gumbel=False, **kwargs):
         super().__init__()
-        self.abits = kwargs.pop('abits', [8])
+        self.abits = kwargs.pop("abits", [8])
         self.bits = bits
         self.gumbel = gumbel
         self.cout = outplane
 
         self.alpha_weight = Parameter(torch.Tensor(len(self.bits), self.cout))
         # Alpha init
-        self.alpha_init = kwargs.pop('alpha_init', 'same')
-        if self.alpha_init == 'same' or self.alpha_init is None:
+        self.alpha_init = kwargs.pop("alpha_init", "same")
+        if self.alpha_init == "same" or self.alpha_init is None:
             if self.gumbel:
                 val_equiprob = 1.0 / len(self.bits)
-                init_logit = math.log(val_equiprob/(1-val_equiprob))
+                init_logit = math.log(val_equiprob / (1 - val_equiprob))
             else:
                 init_logit = 0.01
             self.alpha_weight.data.fill_(init_logit)
-        elif self.alpha_init == 'scaled':
+        elif self.alpha_init == "scaled":
             max_prec = max(self.bits)
-            scaled_val = torch.tensor([bit/max_prec for bit in self.bits])
+            scaled_val = torch.tensor([bit / max_prec for bit in self.bits])
             if self.gumbel:
                 scaled_prob = F.softmax(scaled_val, dim=0)
-                scaled_logit = torch.log(scaled_prob/(1-scaled_prob))
+                scaled_logit = torch.log(scaled_prob / (1 - scaled_prob))
             else:
                 scaled_logit = scaled_val
             for i in range(len(self.bits)):
                 self.alpha_weight.data[i].fill_(scaled_logit[i])
         else:
-            raise ValueError(f'Unknown alpha_init: {self.alpha_init}')
+            raise ValueError(f"Unknown alpha_init: {self.alpha_init}")
 
-        if isinstance(kwargs['kernel_size'], tuple):
-            k_size = kwargs['kernel_size'][0] * kwargs['kernel_size'][1]
+        if isinstance(kwargs["kernel_size"], tuple):
+            k_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
         else:
-            k_size = kwargs['kernel_size'] * kwargs['kernel_size']
+            k_size = kwargs["kernel_size"] * kwargs["kernel_size"]
 
         # Quantizer
         self.mix_weight = nn.ModuleList()
         self.mix_bias = nn.ModuleList()
-        self.train_scale_param = kwargs.pop('train_scale_param', True)
+        self.train_scale_param = kwargs.pop("train_scale_param", True)
         for bit in self.bits:
             round_pow2 = False if bit == 2 else True
             self.mix_weight.append(
                 FQConvWeightQuantization(
-                    outplane, k_size,
+                    outplane,
+                    k_size,
                     num_bits=bit,
                     train_scale_param=self.train_scale_param,
-                    round_pow2=round_pow2))
+                    round_pow2=round_pow2,
+                )
+            )
             self.mix_bias.append(
                 FQConvBiasQuantization(
-                    outplane,
-                    num_bits=bit,
-                    abit=self.abits,
-                    round_pow2=round_pow2))
+                    outplane, num_bits=bit, abit=self.abits, round_pow2=round_pow2
+                )
+            )
 
         self.conv = nn.Conv2d(inplane, outplane, **kwargs)
 
         if self.gumbel:
             self.register_buffer(
-                'sw_buffer', torch.zeros(self.alpha_weight.shape, dtype=torch.float))
+                "sw_buffer", torch.zeros(self.alpha_weight.shape, dtype=torch.float)
+            )
 
     def forward(self, input, temp, is_hard, act_scale=None):
         mix_quant_weight = list()
         mix_quant_bias = list()
         if not self.gumbel:
-            sw = F.softmax(self.alpha_weight/temp, dim=0)
+            sw = F.softmax(self.alpha_weight / temp, dim=0)
         else:
             # If is_hard is True the output is one-hot
             if self.training:  # If model.train()
@@ -1133,7 +1281,7 @@ class SharedMultiPrecConv2d(nn.Module):
 
         conv = self.conv
         weight = conv.weight
-        bias = getattr(conv, 'bias', None)
+        bias = getattr(conv, "bias", None)
         for i, bit in enumerate(self.bits):
             quant_weight = self.mix_weight[i](weight)
             w_scale = self.mix_weight[i].scale_param
@@ -1152,92 +1300,89 @@ class SharedMultiPrecConv2d(nn.Module):
         mix_quant_weight = sum(mix_quant_weight)
         # Compute conv
         out = F.conv2d(
-            input, mix_quant_weight, mix_quant_bias, conv.stride,
-            conv.padding, conv.dilation, conv.groups)
+            input,
+            mix_quant_weight,
+            mix_quant_bias,
+            conv.stride,
+            conv.padding,
+            conv.dilation,
+            conv.groups,
+        )
 
         return out
 
 
 # MR
-class MultiPrecActivConv2d(nn.Module):
+class MixPrecActivConv2d(nn.Module):
 
-    def __init__(self, hw_model, inplane, outplane, wbits, abits,
-                 share_weight=True, fc=None, target='latency', **kwargs):
+    def __init__(
+        self,
+        hw_model,
+        inplane,
+        outplane,
+        wbits,
+        abits,
+        share_weight=True,
+        fc=None,
+        target="latency",
+        **kwargs,
+    ):
         super().__init__()
         self.hw_model = hw_model
         self.wbits = wbits
         self.abits = abits
 
-        self.reg_target = kwargs.pop('reg_target', 'cycle')
+        self.reg_target = kwargs.pop("reg_target", "cycle")
 
-        self.input_qtz = kwargs.pop('fix_qtz', False)
+        self.input_qtz = kwargs.pop("fix_qtz", False)
 
-        self.search_types = ['fixed', 'mixed', 'multi']
+        self.search_types = ["fixed", "mixed", "multi"]
         if fc in self.search_types:
             self.fc = fc
         else:
             self.fc = False
 
-        self.gumbel = kwargs.pop('gumbel', False)
+        self.gumbel = kwargs.pop("gumbel", False)
         self.temp = 1
 
-        max_inp_val = kwargs.pop('max_inp_val', 6.)
-        round_pow2 = kwargs.pop('round_pow2', True)  # TODO: in general should be False
+        max_inp_val = kwargs.pop("max_inp_val", 6.0)
+        round_pow2 = kwargs.pop("round_pow2", True)
 
         # build mix-precision branches
-        self.mix_activ = MixQuantPaCTActiv(self.abits, max_inp_val, round_pow2,
-                                           gumbel=self.gumbel)
+        self.mix_activ = MixQuantPaCTActiv(
+            self.abits, max_inp_val, round_pow2, gumbel=self.gumbel
+        )
         # for multiprec, only share-weight is feasible
         assert share_weight
-        if not self.fc:
-            self.mix_weight = SharedMultiPrecConv2d(
-                inplane, outplane, self.wbits, abits=abits, gumbel=self.gumbel, **kwargs)
-        else:
-            # If the layer is fc we can use:
-            if self.fc == 'fixed':
-                # Fixed quantization on 8bits
-                self.mix_weight = QuantMixChanConv2d(inplane, outplane, 8, **kwargs)
-            elif self.fc == 'mixed':
-                # Mixed-precision search
-                self.mix_weight = SharedMixQuantChanConv2d(
-                    inplane, outplane, wbits, gumbel=self.gumbel, **kwargs)
-            elif self.fc == 'multi':
-                # Multi-precision search
-                self.mix_weight = SharedMultiPrecConv2d(
-                    inplane, outplane, wbits, abits=abits, gumbel=self.gumbel, **kwargs)
-            else:
-                raise ValueError(f"Unknown fc search, possible values are {self.search_types}")
+        # Mixed-precision search
+        self.mix_weight = SharedMixQuantChanConv2d(
+            inplane, outplane, self.wbits, abits=abits, gumbel=self.gumbel, **kwargs
+        )
 
         # complexities
-        self.stride = kwargs['stride'] if 'stride' in kwargs else 1
-        if isinstance(kwargs['kernel_size'], tuple):
-            kernel_size = kwargs['kernel_size'][0] * kwargs['kernel_size'][1]
-            self.k_x = kwargs['kernel_size'][0]
-            self.k_y = kwargs['kernel_size'][1]
+        self.stride = kwargs["stride"] if "stride" in kwargs else 1
+        if isinstance(kwargs["kernel_size"], tuple):
+            kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
+            self.k_x = kwargs["kernel_size"][0]
+            self.k_y = kwargs["kernel_size"][1]
         else:
-            kernel_size = kwargs['kernel_size'] * kwargs['kernel_size']
-            self.k_x = kwargs['kernel_size']
-            self.k_y = kwargs['kernel_size']
+            kernel_size = kwargs["kernel_size"] * kwargs["kernel_size"]
+            self.k_x = kwargs["kernel_size"]
+            self.k_y = kwargs["kernel_size"]
+        self.ch_out = outplane
         self.ch_in = inplane
-        self.groups = kwargs['groups']
+        self.groups = kwargs["groups"]
         self.out_x = None
         self.out_y = None
-        self.param_size = inplane * outplane * kernel_size / kwargs['groups'] * 1e-6
-        self.filter_size = self.param_size / float(self.stride ** 2.0)
-        self.register_buffer('size_product', torch.tensor(0, dtype=torch.float))
-        self.register_buffer('memory_size', torch.tensor(0, dtype=torch.float))
+        self.param_size = inplane * outplane * kernel_size / kwargs["groups"] * 1e-6
+        self.filter_size = self.param_size / float(self.stride**2.0)
+        self.register_buffer("size_product", torch.tensor(0, dtype=torch.float))
+        self.register_buffer("memory_size", torch.tensor(0, dtype=torch.float))
 
         self.target = target
-        if target == 'latency':
+        if target == "latency":
             self.complexity_loss = self._complexity_loss_latency
             self.fetch_best_arch = self._fetch_best_arch_latency
-        elif target == 'power':
-            self.power = DianaPower()
-            self.complexity_loss = self._complexity_loss_power
-            self.fetch_best_arch = self._fetch_best_arch_power
-        elif target == 'power-naive':
-            self.complexity_loss = self._complexity_loss_power_naive
-            self.fetch_best_arch = self._fetch_best_arch_power_naive
         else:
             raise ValueError('Use "latency" or "power" as target.')
 
@@ -1246,9 +1391,13 @@ class MultiPrecActivConv2d(nn.Module):
         in_shape = input.shape
         # self.out_x = in_shape[-2] / float(self.stride)
         # self.out_y = in_shape[-1] / float(self.stride)
-        tmp = torch.tensor(in_shape[1] * in_shape[2] * in_shape[3] * 1e-3, dtype=torch.float)
+        tmp = torch.tensor(
+            in_shape[1] * in_shape[2] * in_shape[3] * 1e-3, dtype=torch.float
+        )
         self.memory_size.copy_(tmp)
-        tmp = torch.tensor(self.filter_size * in_shape[-1] * in_shape[-2], dtype=torch.float)
+        tmp = torch.tensor(
+            self.filter_size * in_shape[-1] * in_shape[-2], dtype=torch.float
+        )
         self.size_product.copy_(tmp)
         if not self.input_qtz:
             out, act_scale = self.mix_activ(input, temp, is_hard)
@@ -1269,34 +1418,344 @@ class MultiPrecActivConv2d(nn.Module):
 
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
-            'ch_in': self.ch_in,
-            'k_x': self.k_x,
-            'k_y': self.k_y,
-            'groups': self.groups,
-            'out_x': self.out_x,
-            'out_y': self.out_y,
-            }
+            "ch_out": self.ch_out,
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
 
         if not self.input_qtz:
-            s_a = F.softmax(self.mix_activ.alpha_activ/self.temp, dim=0)
+            s_a = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
         else:
             raise NotImplementedError
-            s_a = torch.zeros(len(abits), dtype=torch.float).to(self.mix_activ.alpha_activ.device)
-            s_a[-1] = 1.
-        s_w = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+            s_a = torch.zeros(len(abits), dtype=torch.float).to(
+                self.mix_activ.alpha_activ.device
+            )
+            s_a[-1] = 1.0
+        s_w = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
+        cycles = []
+        cycle = 0
+        # TODO: Check if doable w/out for and if yes if it is faster
+        for i, bit in enumerate(wbits):
+            if bit == 2:  # Analog accelerator
+                # cycle = sum(s_w[i]) / self.hw_model('analog')
+                _, cycle = analog_cycles(
+                    self.ch_in,
+                    self.ch_out,
+                    self.k_x,
+                    self.k_y,
+                    self.out_x,
+                    self.out_y,
+                )
+            else:  # Digital accelerator
+                # cycle = sum(s_w[i]) / self.hw_model('digital')
+                _, cycle = digital_cycles(
+                    self.ch_in,
+                    self.ch_out,
+                    self.k_x,
+                    self.k_y,
+                    self.out_x,
+                    self.out_y,
+                    self.groups,
+                )
+            cycles.append(torch.tensor(cycle, dtype=torch.float))
+
+        # Build tensor of cycles
+        # NB: torch.tensor() does not preserve gradients!!!
+        t_cycles = torch.stack(cycles)
+        t_c = torch.dot(s_w, t_cycles.to(s_w.device))
+
+        return t_c
+        # return torch.max(torch.stack(cycles))
+
+    def _fetch_best_arch_latency(self, layer_idx):
+        size_product = float(self.size_product.cpu().numpy())
+        memory_size = float(self.memory_size.cpu().numpy())
+
+        # Activations
+        if not self.input_qtz:
+            prob_activ = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
+            prob_activ = prob_activ.detach().cpu()
+            best_activ = prob_activ.argmax()
+            mix_abit = 0
+            abits = self.mix_activ.bits
+            for i in range(len(abits)):
+                mix_abit += prob_activ[i] * abits[i]
+        else:
+            raise NotImplementedError
+            prob_activ = 1
+            best_activ = -1
+            abits = self.mix_activ.bits
+            mix_abit = 8
+
+        # Weights
+        if not self.fc or self.fc == "multi":
+            prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
+            prob_weight = prob_weight.detach().cpu()
+            best_weight = prob_weight.argmax(axis=0)
+            mix_wbit = 0
+            wbits = self.mix_weight.bits
+            for i in range(len(wbits)):
+                mix_wbit += prob_weight[i] * wbits[i]
+        else:
+            raise NotImplementedError
+            if self.fc == "fixed":
+                prob_weight = 1
+                mix_wbit = 8
+            elif self.fc == "mixed":
+                prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
+                prob_weight = prob_weight.detach().cpu().numpy()
+                best_weight = prob_weight.argmax(axis=0)
+                mix_wbit = 0
+                wbits = self.mix_weight.bits
+                for i in range(len(wbits)):
+                    mix_wbit += prob_weight[i] * wbits[i]
+
+        weight_shape = list(self.mix_weight.conv.weight.shape)
+        print(
+            "idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "memory: {:.3f}K * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_activ,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                memory_size,
+                mix_abit,
+            )
+        )
+        print(
+            "idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "param: {:.3f}M * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_weight,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                self.param_size,
+                mix_wbit,
+            )
+        )
+
+        # Define dict where shapes informations needed to model accelerators perf
+        conv_shape = {
+            "ch_out": self.ch_out,
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
+        if wbits[best_weight] == 2:
+            _, cycles = analog_cycles(
+                self.ch_in,
+                self.ch_out,
+                self.k_x,
+                self.k_y,
+                self.out_x,
+                self.out_y,
+            )
+        else:
+            _, cycles = digital_cycles(
+                self.ch_in,
+                self.ch_out,
+                self.k_x,
+                self.k_y,
+                self.out_x,
+                self.out_y,
+                self.groups,
+            )
+
+        if not self.input_qtz:
+            if best_activ.dtype is torch.int64:  # Single val
+                best_abits = [[abits[best_activ]]]
+            else:
+                best_abits = [abits[i] for i in best_activ]
+            best_wbits = [[wbits[best_weight]]]
+            best_arch = {"best_activ": best_abits, "best_weight": best_wbits}
+            # bitops = size_product * abits[best_activ] * best_wbit
+            bita = memory_size * abits[best_activ]
+        else:
+            raise NotImplementedError
+            best_arch = {"best_activ": [8], "best_weight": [best_weight]}
+            # bitops = size_product * 8 * best_wbit
+            bita = memory_size * 8
+
+        bitw = self.param_size * wbits[best_weight]
+        mixbita = memory_size * mix_abit
+        mixbitw = self.param_size * mix_wbit
+
+        return best_arch, cycles, bita, bitw, cycles, mixbita, mixbitw
+        # return best_arch, bitops, bita, bitw, mixbitops, mixbita, mixbitw
+
+
+# MR
+class MultiPrecActivConv2d(nn.Module):
+
+    def __init__(
+        self,
+        hw_model,
+        inplane,
+        outplane,
+        wbits,
+        abits,
+        share_weight=True,
+        fc=None,
+        target="latency",
+        **kwargs,
+    ):
+        super().__init__()
+        self.hw_model = hw_model
+        self.wbits = wbits
+        self.abits = abits
+
+        self.reg_target = kwargs.pop("reg_target", "cycle")
+
+        self.input_qtz = kwargs.pop("fix_qtz", False)
+
+        self.search_types = ["fixed", "mixed", "multi"]
+        if fc in self.search_types:
+            self.fc = fc
+        else:
+            self.fc = False
+
+        self.gumbel = kwargs.pop("gumbel", False)
+        self.temp = 1
+
+        max_inp_val = kwargs.pop("max_inp_val", 6.0)
+        round_pow2 = kwargs.pop("round_pow2", True)  # TODO: in general should be False
+
+        # build mix-precision branches
+        self.mix_activ = MixQuantPaCTActiv(
+            self.abits, max_inp_val, round_pow2, gumbel=self.gumbel
+        )
+        # for multiprec, only share-weight is feasible
+        assert share_weight
+        if not self.fc:
+            self.mix_weight = SharedMultiPrecConv2d(
+                inplane, outplane, self.wbits, abits=abits, gumbel=self.gumbel, **kwargs
+            )
+        else:
+            # If the layer is fc we can use:
+            if self.fc == "fixed":
+                # Fixed quantization on 8bits
+                self.mix_weight = QuantMixChanConv2d(inplane, outplane, 8, **kwargs)
+            elif self.fc == "mixed":
+                # Mixed-precision search
+                self.mix_weight = SharedMixQuantChanConv2d(
+                    inplane, outplane, wbits, gumbel=self.gumbel, **kwargs
+                )
+            elif self.fc == "multi":
+                # Multi-precision search
+                self.mix_weight = SharedMultiPrecConv2d(
+                    inplane, outplane, wbits, abits=abits, gumbel=self.gumbel, **kwargs
+                )
+            else:
+                raise ValueError(
+                    f"Unknown fc search, possible values are {self.search_types}"
+                )
+
+        # complexities
+        self.stride = kwargs["stride"] if "stride" in kwargs else 1
+        if isinstance(kwargs["kernel_size"], tuple):
+            kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
+            self.k_x = kwargs["kernel_size"][0]
+            self.k_y = kwargs["kernel_size"][1]
+        else:
+            kernel_size = kwargs["kernel_size"] * kwargs["kernel_size"]
+            self.k_x = kwargs["kernel_size"]
+            self.k_y = kwargs["kernel_size"]
+        self.ch_in = inplane
+        self.groups = kwargs["groups"]
+        self.out_x = None
+        self.out_y = None
+        self.param_size = inplane * outplane * kernel_size / kwargs["groups"] * 1e-6
+        self.filter_size = self.param_size / float(self.stride**2.0)
+        self.register_buffer("size_product", torch.tensor(0, dtype=torch.float))
+        self.register_buffer("memory_size", torch.tensor(0, dtype=torch.float))
+
+        self.target = target
+        if target == "latency":
+            self.complexity_loss = self._complexity_loss_latency
+            self.fetch_best_arch = self._fetch_best_arch_latency
+        elif target == "power":
+            self.power = DianaPower()
+            self.complexity_loss = self._complexity_loss_power
+            self.fetch_best_arch = self._fetch_best_arch_power
+        elif target == "power-naive":
+            self.complexity_loss = self._complexity_loss_power_naive
+            self.fetch_best_arch = self._fetch_best_arch_power_naive
+        else:
+            raise ValueError('Use "latency" or "power" as target.')
+
+    def forward(self, input, temp, is_hard):
+        self.temp = temp
+        in_shape = input.shape
+        # self.out_x = in_shape[-2] / float(self.stride)
+        # self.out_y = in_shape[-1] / float(self.stride)
+        tmp = torch.tensor(
+            in_shape[1] * in_shape[2] * in_shape[3] * 1e-3, dtype=torch.float
+        )
+        self.memory_size.copy_(tmp)
+        tmp = torch.tensor(
+            self.filter_size * in_shape[-1] * in_shape[-2], dtype=torch.float
+        )
+        self.size_product.copy_(tmp)
+        if not self.input_qtz:
+            out, act_scale = self.mix_activ(input, temp, is_hard)
+        else:
+            raise NotImplementedError
+            out = _channel_asym_min_max_quantize.apply(input, 8)
+            act_scale = None
+        out = self.mix_weight(out, temp, is_hard, act_scale)
+        out_shape = out.shape
+        self.out_x = out_shape[-2]
+        self.out_y = out_shape[-1]
+        return out
+
+    def _complexity_loss_latency(self):
+        # cout = self.mix_weight.cout
+        abits = self.mix_activ.bits
+        wbits = self.mix_weight.bits
+
+        # Define dict where shapes informations needed to model accelerators perf
+        conv_shape = {
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
+
+        if not self.input_qtz:
+            s_a = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
+        else:
+            raise NotImplementedError
+            s_a = torch.zeros(len(abits), dtype=torch.float).to(
+                self.mix_activ.alpha_activ.device
+            )
+            s_a[-1] = 1.0
+        s_w = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
 
         cycles = []
         cycle = 0
         # TODO: Check if doable w/out for and if yes if it is faster
         for i, bit in enumerate(wbits):
             ch_eff = sum(s_w[i])
-            conv_shape['ch_out'] = ch_eff
+            conv_shape["ch_out"] = ch_eff
             if bit == 2:  # Analog accelerator
                 # cycle = sum(s_w[i]) / self.hw_model('analog')
-                cycle = self.hw_model('analog', **conv_shape)  # * 1e-6  # [M]Cycles
+                cycle = self.hw_model("analog", **conv_shape)  # * 1e-6  # [M]Cycles
             else:  # Digital accelerator
                 # cycle = sum(s_w[i]) / self.hw_model('digital')
-                cycle = self.hw_model('digital', **conv_shape)  # * 1e-6  # [M]Cycles
+                cycle = self.hw_model("digital", **conv_shape)  # * 1e-6  # [M]Cycles
             cycles.append(cycle)
 
         # Build tensor of cycles
@@ -1316,37 +1775,41 @@ class MultiPrecActivConv2d(nn.Module):
 
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
-            'ch_in': self.ch_in,
-            'k_x': self.k_x,
-            'k_y': self.k_y,
-            'groups': self.groups,
-            'out_x': self.out_x,
-            'out_y': self.out_y,
-            }
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
 
         if not self.input_qtz:
-            s_a = F.softmax(self.mix_activ.alpha_activ/self.temp, dim=0)
+            s_a = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
         else:
             raise NotImplementedError
-            s_a = torch.zeros(len(abits), dtype=torch.float).to(self.mix_activ.alpha_activ.device)
-            s_a[-1] = 1.
-        s_w = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+            s_a = torch.zeros(len(abits), dtype=torch.float).to(
+                self.mix_activ.alpha_activ.device
+            )
+            s_a[-1] = 1.0
+        s_w = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
 
-        cycles = {2: torch.tensor(0., device=s_w.device),
-                  8: torch.tensor(0., device=s_w.device)}  # TODO: Modify, ugly
+        cycles = {
+            2: torch.tensor(0.0, device=s_w.device),
+            8: torch.tensor(0.0, device=s_w.device),
+        }  # TODO: Modify, ugly
         cycle = 0
         # TODO: Check if doable w/out for and if yes if it is faster
         for i, bit in enumerate(wbits):
             ch_eff = sum(s_w[i])
-            conv_shape['ch_out'] = ch_eff
+            conv_shape["ch_out"] = ch_eff
             if bit == 2:  # Analog accelerator
                 # cycle = sum(s_w[i]) / self.hw_model('analog')
                 # t_ana
-                cycle = self.hw_model('analog', **conv_shape)  # * 1e-6  # [M]Cycles
+                cycle = self.hw_model("analog", **conv_shape)  # * 1e-6  # [M]Cycles
             else:  # Digital accelerator
                 # cycle = sum(s_w[i]) / self.hw_model('digital')
                 # t_dig
-                cycle = self.hw_model('digital', **conv_shape)  # * 1e-6  # [M]Cycles
+                cycle = self.hw_model("digital", **conv_shape)  # * 1e-6  # [M]Cycles
             cycles[bit] = cycle
 
         # Build tensor of cycles
@@ -1374,37 +1837,41 @@ class MultiPrecActivConv2d(nn.Module):
 
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
-            'ch_in': self.ch_in,
-            'k_x': self.k_x,
-            'k_y': self.k_y,
-            'groups': self.groups,
-            'out_x': self.out_x,
-            'out_y': self.out_y,
-            }
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
 
         if not self.input_qtz:
-            s_a = F.softmax(self.mix_activ.alpha_activ/self.temp, dim=0)
+            s_a = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
         else:
             raise NotImplementedError
-            s_a = torch.zeros(len(abits), dtype=torch.float).to(self.mix_activ.alpha_activ.device)
-            s_a[-1] = 1.
-        s_w = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+            s_a = torch.zeros(len(abits), dtype=torch.float).to(
+                self.mix_activ.alpha_activ.device
+            )
+            s_a[-1] = 1.0
+        s_w = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
 
-        cycles = {2: torch.tensor(0., device=s_w.device),
-                  8: torch.tensor(0., device=s_w.device)}  # TODO: Modify, ugly
+        cycles = {
+            2: torch.tensor(0.0, device=s_w.device),
+            8: torch.tensor(0.0, device=s_w.device),
+        }  # TODO: Modify, ugly
         cycle = 0
         # TODO: Check if doable w/out for and if yes if it is faster
         for i, bit in enumerate(wbits):
             ch_eff = sum(s_w[i])
-            conv_shape['ch_out'] = ch_eff
+            conv_shape["ch_out"] = ch_eff
             if bit == 2:  # Analog accelerator
                 # cycle = sum(s_w[i]) / self.hw_model('analog')
                 # t_ana
-                cycle = self.hw_model('analog', **conv_shape)  # * 1e-6  # [M]Cycles
+                cycle = self.hw_model("analog", **conv_shape)  # * 1e-6  # [M]Cycles
             else:  # Digital accelerator
                 # cycle = sum(s_w[i]) / self.hw_model('digital')
                 # t_dig
-                cycle = self.hw_model('digital', **conv_shape)  # * 1e-6  # [M]Cycles
+                cycle = self.hw_model("digital", **conv_shape)  # * 1e-6  # [M]Cycles
             cycles[bit] = cycle
 
         # Build tensor of cycles
@@ -1419,7 +1886,7 @@ class MultiPrecActivConv2d(nn.Module):
 
         # Activations
         if not self.input_qtz:
-            prob_activ = F.softmax(self.mix_activ.alpha_activ/self.temp, dim=0)
+            prob_activ = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
             prob_activ = prob_activ.detach().cpu()
             best_activ = prob_activ.argmax()
             mix_abit = 0
@@ -1434,8 +1901,8 @@ class MultiPrecActivConv2d(nn.Module):
             mix_abit = 8
 
         # Weights
-        if not self.fc or self.fc == 'multi':
-            prob_weight = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+        if not self.fc or self.fc == "multi":
+            prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
             prob_weight = prob_weight.detach().cpu()
             best_weight = prob_weight.argmax(axis=0)
             mix_wbit = 0
@@ -1446,11 +1913,11 @@ class MultiPrecActivConv2d(nn.Module):
             mix_wbit = mix_wbit / cout
         else:
             raise NotImplementedError
-            if self.fc == 'fixed':
+            if self.fc == "fixed":
                 prob_weight = 1
                 mix_wbit = 8
-            elif self.fc == 'mixed':
-                prob_weight = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+            elif self.fc == "mixed":
+                prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
                 prob_weight = prob_weight.detach().cpu().numpy()
                 best_weight = prob_weight.argmax(axis=0)
                 mix_wbit = 0
@@ -1459,52 +1926,72 @@ class MultiPrecActivConv2d(nn.Module):
                     mix_wbit += prob_weight[i] * wbits[i]
 
         weight_shape = list(self.mix_weight.conv.weight.shape)
-        print('idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, '
-              'memory: {:.3f}K * {:.3f}'.format(layer_idx, weight_shape, prob_activ, size_product,
-                                                mix_abit, mix_wbit, memory_size, mix_abit))
-        print('idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, '
-              'param: {:.3f}M * {:.3f}'.format(layer_idx, weight_shape, prob_weight, size_product,
-                                               mix_abit, mix_wbit, self.param_size, mix_wbit))
+        print(
+            "idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "memory: {:.3f}K * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_activ,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                memory_size,
+                mix_abit,
+            )
+        )
+        print(
+            "idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "param: {:.3f}M * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_weight,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                self.param_size,
+                mix_wbit,
+            )
+        )
 
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
-            'ch_in': self.ch_in,
-            'k_x': self.k_x,
-            'k_y': self.k_y,
-            'groups': self.groups,
-            'out_x': self.out_x,
-            'out_y': self.out_y,
-            }
-        if not self.fc or self.fc == 'multi':
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
+        if not self.fc or self.fc == "multi":
             best_wbit = sum([wbits[_] for _ in best_weight]) / cout
             eff_cycles = []
             mix_eff_cycles = []
             for i, bit in enumerate(wbits):
-                eff_cycle = 0.
-                mix_eff_cycle = 0.
+                eff_cycle = 0.0
+                mix_eff_cycle = 0.0
                 ch_out = sum(best_weight == i)
                 mix_ch_out = sum(prob_weight[i])
-                conv_shape['ch_out'] = ch_out
+                conv_shape["ch_out"] = ch_out
                 if bit == 2:
                     # if ch_out != 0:
-                    eff_cycle = self.hw_model('analog', **conv_shape)
-                    conv_shape['ch_out'] = mix_ch_out
-                    mix_eff_cycle = self.hw_model('analog', **conv_shape)
+                    eff_cycle = self.hw_model("analog", **conv_shape)
+                    conv_shape["ch_out"] = mix_ch_out
+                    mix_eff_cycle = self.hw_model("analog", **conv_shape)
                 else:
                     # if ch_out != 0:
-                    eff_cycle = self.hw_model('digital', **conv_shape)
-                    conv_shape['ch_out'] = mix_ch_out
-                    mix_eff_cycle = self.hw_model('digital', **conv_shape)
+                    eff_cycle = self.hw_model("digital", **conv_shape)
+                    conv_shape["ch_out"] = mix_ch_out
+                    mix_eff_cycle = self.hw_model("digital", **conv_shape)
                 eff_cycles.append(eff_cycle)
                 mix_eff_cycles.append(mix_eff_cycle)
             slowest_eff_cycle = max(eff_cycles)
             slowest_mix_eff_cycle = max(mix_eff_cycles)
         else:
-            if self.fc == 'fixed':
+            if self.fc == "fixed":
                 best_wbit = 8
                 best_weight = 8
                 # mac_cycle = self.hw_model('digital')
-            elif self.fc == 'mixed':
+            elif self.fc == "mixed":
                 best_wbit = wbits[best_weight]
                 # mac_cycle = self.hw_model('digital')
 
@@ -1514,12 +2001,12 @@ class MultiPrecActivConv2d(nn.Module):
             else:
                 best_abits = [abits[i] for i in best_activ]
             best_wbits = [[wbits[i] for i in best_weight]]
-            best_arch = {'best_activ': best_abits, 'best_weight': best_wbits}
+            best_arch = {"best_activ": best_abits, "best_weight": best_wbits}
             # bitops = size_product * abits[best_activ] * best_wbit
             bita = memory_size * abits[best_activ]
         else:
             raise NotImplementedError
-            best_arch = {'best_activ': [8], 'best_weight': [best_weight]}
+            best_arch = {"best_activ": [8], "best_weight": [best_weight]}
             # bitops = size_product * 8 * best_wbit
             bita = memory_size * 8
 
@@ -1539,7 +2026,7 @@ class MultiPrecActivConv2d(nn.Module):
 
         # Activations
         if not self.input_qtz:
-            prob_activ = F.softmax(self.mix_activ.alpha_activ/self.temp, dim=0)
+            prob_activ = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
             prob_activ = prob_activ.detach().cpu()
             best_activ = prob_activ.argmax()
             mix_abit = 0
@@ -1554,8 +2041,8 @@ class MultiPrecActivConv2d(nn.Module):
             mix_abit = 8
 
         # Weights
-        if not self.fc or self.fc == 'multi':
-            prob_weight = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+        if not self.fc or self.fc == "multi":
+            prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
             prob_weight = prob_weight.detach().cpu()
             best_weight = prob_weight.argmax(axis=0)
             mix_wbit = 0
@@ -1566,11 +2053,11 @@ class MultiPrecActivConv2d(nn.Module):
             mix_wbit = mix_wbit / cout
         else:
             raise NotImplementedError
-            if self.fc == 'fixed':
+            if self.fc == "fixed":
                 prob_weight = 1
                 mix_wbit = 8
-            elif self.fc == 'mixed':
-                prob_weight = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+            elif self.fc == "mixed":
+                prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
                 prob_weight = prob_weight.detach().cpu().numpy()
                 best_weight = prob_weight.argmax(axis=0)
                 mix_wbit = 0
@@ -1579,47 +2066,71 @@ class MultiPrecActivConv2d(nn.Module):
                     mix_wbit += prob_weight[i] * wbits[i]
 
         weight_shape = list(self.mix_weight.conv.weight.shape)
-        print('idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, '
-              'memory: {:.3f}K * {:.3f}'.format(layer_idx, weight_shape, prob_activ, size_product,
-                                                mix_abit, mix_wbit, memory_size, mix_abit))
-        print('idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, '
-              'param: {:.3f}M * {:.3f}'.format(layer_idx, weight_shape, prob_weight, size_product,
-                                               mix_abit, mix_wbit, self.param_size, mix_wbit))
+        print(
+            "idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "memory: {:.3f}K * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_activ,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                memory_size,
+                mix_abit,
+            )
+        )
+        print(
+            "idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "param: {:.3f}M * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_weight,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                self.param_size,
+                mix_wbit,
+            )
+        )
 
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
-            'ch_in': self.ch_in,
-            'k_x': self.k_x,
-            'k_y': self.k_y,
-            'groups': self.groups,
-            'out_x': self.out_x,
-            'out_y': self.out_y,
-            }
-        if not self.fc or self.fc == 'multi':
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
+        if not self.fc or self.fc == "multi":
             device = self.mix_weight.alpha_weight.device
             best_wbit = sum([wbits[_] for _ in best_weight]) / cout
-            eff_cycles = {2: torch.tensor(0., device=device),
-                          8: torch.tensor(0., device=device)}  # TODO: Modify, ugly
+            eff_cycles = {
+                2: torch.tensor(0.0, device=device),
+                8: torch.tensor(0.0, device=device),
+            }  # TODO: Modify, ugly
             # eff_cycles = {}
-            mix_eff_cycles = {2: torch.tensor(0., device=device),
-                              8: torch.tensor(0., device=device)}  # TODO: Modify, ugly
+            mix_eff_cycles = {
+                2: torch.tensor(0.0, device=device),
+                8: torch.tensor(0.0, device=device),
+            }  # TODO: Modify, ugly
             # mix_eff_cycles = {}
             for i, bit in enumerate(wbits):
-                eff_cycle = 0.
-                mix_eff_cycle = 0.
+                eff_cycle = 0.0
+                mix_eff_cycle = 0.0
                 ch_out = sum(best_weight == i)
                 mix_ch_out = sum(prob_weight[i])
-                conv_shape['ch_out'] = ch_out
+                conv_shape["ch_out"] = ch_out
                 if bit == 2:
                     # if ch_out != 0:
-                    eff_cycle = self.hw_model('analog', **conv_shape)
-                    conv_shape['ch_out'] = mix_ch_out
-                    mix_eff_cycle = self.hw_model('analog', **conv_shape)
+                    eff_cycle = self.hw_model("analog", **conv_shape)
+                    conv_shape["ch_out"] = mix_ch_out
+                    mix_eff_cycle = self.hw_model("analog", **conv_shape)
                 else:
                     # if ch_out != 0:
-                    eff_cycle = self.hw_model('digital', **conv_shape)
-                    conv_shape['ch_out'] = mix_ch_out
-                    mix_eff_cycle = self.hw_model('digital', **conv_shape)
+                    eff_cycle = self.hw_model("digital", **conv_shape)
+                    conv_shape["ch_out"] = mix_ch_out
+                    mix_eff_cycle = self.hw_model("digital", **conv_shape)
                 eff_cycles[bit] = eff_cycle
                 mix_eff_cycles[bit] = mix_eff_cycle
             t_ana_eff = eff_cycles[2]
@@ -1629,19 +2140,23 @@ class MultiPrecActivConv2d(nn.Module):
             # slowest_eff_cycle = max(list(eff_cycles.values()))
             # slowest_mix_eff_cycle = max(list(mix_eff_cycles.values()))
             min_eff = min(t_ana_eff, t_dig_eff)
-            pow_eff = (self.power.p_hyb * min_eff) + \
-                      (self.power.p_ana * (t_ana_eff - min_eff)) + \
-                      (self.power.p_dig * (t_dig_eff - min_eff))
+            pow_eff = (
+                (self.power.p_hyb * min_eff)
+                + (self.power.p_ana * (t_ana_eff - min_eff))
+                + (self.power.p_dig * (t_dig_eff - min_eff))
+            )
             min_mix_eff = min(t_ana_mix_eff, t_dig_mix_eff)
-            pow_mix_eff = (self.power.p_hyb * min_mix_eff) + \
-                          (self.power.p_ana * (t_ana_mix_eff - min_mix_eff)) + \
-                          (self.power.p_dig * (t_dig_mix_eff - min_mix_eff))
+            pow_mix_eff = (
+                (self.power.p_hyb * min_mix_eff)
+                + (self.power.p_ana * (t_ana_mix_eff - min_mix_eff))
+                + (self.power.p_dig * (t_dig_mix_eff - min_mix_eff))
+            )
         else:
-            if self.fc == 'fixed':
+            if self.fc == "fixed":
                 best_wbit = 8
                 best_weight = 8
                 # mac_cycle = self.hw_model('digital')
-            elif self.fc == 'mixed':
+            elif self.fc == "mixed":
                 best_wbit = wbits[best_weight]
                 # mac_cycle = self.hw_model('digital')
 
@@ -1651,12 +2166,12 @@ class MultiPrecActivConv2d(nn.Module):
             else:
                 best_abits = [abits[i] for i in best_activ]
             best_wbits = [[wbits[i] for i in best_weight]]
-            best_arch = {'best_activ': best_abits, 'best_weight': best_wbits}
+            best_arch = {"best_activ": best_abits, "best_weight": best_wbits}
             # bitops = size_product * abits[best_activ] * best_wbit
             bita = memory_size * abits[best_activ]
         else:
             raise NotImplementedError
-            best_arch = {'best_activ': [8], 'best_weight': [best_weight]}
+            best_arch = {"best_activ": [8], "best_weight": [best_weight]}
             # bitops = size_product * 8 * best_wbit
             bita = memory_size * 8
 
@@ -1678,7 +2193,7 @@ class MultiPrecActivConv2d(nn.Module):
 
         # Activations
         if not self.input_qtz:
-            prob_activ = F.softmax(self.mix_activ.alpha_activ/self.temp, dim=0)
+            prob_activ = F.softmax(self.mix_activ.alpha_activ / self.temp, dim=0)
             prob_activ = prob_activ.detach().cpu()
             best_activ = prob_activ.argmax()
             mix_abit = 0
@@ -1693,8 +2208,8 @@ class MultiPrecActivConv2d(nn.Module):
             mix_abit = 8
 
         # Weights
-        if not self.fc or self.fc == 'multi':
-            prob_weight = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+        if not self.fc or self.fc == "multi":
+            prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
             prob_weight = prob_weight.detach().cpu()
             best_weight = prob_weight.argmax(axis=0)
             mix_wbit = 0
@@ -1705,11 +2220,11 @@ class MultiPrecActivConv2d(nn.Module):
             mix_wbit = mix_wbit / cout
         else:
             raise NotImplementedError
-            if self.fc == 'fixed':
+            if self.fc == "fixed":
                 prob_weight = 1
                 mix_wbit = 8
-            elif self.fc == 'mixed':
-                prob_weight = F.softmax(self.mix_weight.alpha_weight/self.temp, dim=0)
+            elif self.fc == "mixed":
+                prob_weight = F.softmax(self.mix_weight.alpha_weight / self.temp, dim=0)
                 prob_weight = prob_weight.detach().cpu().numpy()
                 best_weight = prob_weight.argmax(axis=0)
                 mix_wbit = 0
@@ -1718,57 +2233,81 @@ class MultiPrecActivConv2d(nn.Module):
                     mix_wbit += prob_weight[i] * wbits[i]
 
         weight_shape = list(self.mix_weight.conv.weight.shape)
-        print('idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, '
-              'memory: {:.3f}K * {:.3f}'.format(layer_idx, weight_shape, prob_activ, size_product,
-                                                mix_abit, mix_wbit, memory_size, mix_abit))
-        print('idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, '
-              'param: {:.3f}M * {:.3f}'.format(layer_idx, weight_shape, prob_weight, size_product,
-                                               mix_abit, mix_wbit, self.param_size, mix_wbit))
+        print(
+            "idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "memory: {:.3f}K * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_activ,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                memory_size,
+                mix_abit,
+            )
+        )
+        print(
+            "idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+            "param: {:.3f}M * {:.3f}".format(
+                layer_idx,
+                weight_shape,
+                prob_weight,
+                size_product,
+                mix_abit,
+                mix_wbit,
+                self.param_size,
+                mix_wbit,
+            )
+        )
 
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
-            'ch_in': self.ch_in,
-            'k_x': self.k_x,
-            'k_y': self.k_y,
-            'groups': self.groups,
-            'out_x': self.out_x,
-            'out_y': self.out_y,
-            }
-        if not self.fc or self.fc == 'multi':
+            "ch_in": self.ch_in,
+            "k_x": self.k_x,
+            "k_y": self.k_y,
+            "groups": self.groups,
+            "out_x": self.out_x,
+            "out_y": self.out_y,
+        }
+        if not self.fc or self.fc == "multi":
             device = self.mix_weight.alpha_weight.device
             best_wbit = sum([wbits[_] for _ in best_weight]) / cout
-            eff_cycles = {2: torch.tensor(0., device=device),
-                          8: torch.tensor(0., device=device)}  # TODO: Modify, ugly
+            eff_cycles = {
+                2: torch.tensor(0.0, device=device),
+                8: torch.tensor(0.0, device=device),
+            }  # TODO: Modify, ugly
             # eff_cycles = {}
-            mix_eff_cycles = {2: torch.tensor(0., device=device),
-                              8: torch.tensor(0., device=device)}  # TODO: Modify, ugly
+            mix_eff_cycles = {
+                2: torch.tensor(0.0, device=device),
+                8: torch.tensor(0.0, device=device),
+            }  # TODO: Modify, ugly
             # mix_eff_cycles = {}
             for i, bit in enumerate(wbits):
-                eff_cycle = 0.
-                mix_eff_cycle = 0.
+                eff_cycle = 0.0
+                mix_eff_cycle = 0.0
                 ch_out = sum(best_weight == i)
                 mix_ch_out = sum(prob_weight[i])
-                conv_shape['ch_out'] = ch_out
+                conv_shape["ch_out"] = ch_out
                 if bit == 2:
                     # if ch_out != 0:
-                    eff_cycle = self.hw_model('analog', **conv_shape)
-                    conv_shape['ch_out'] = mix_ch_out
-                    mix_eff_cycle = self.hw_model('analog', **conv_shape)
+                    eff_cycle = self.hw_model("analog", **conv_shape)
+                    conv_shape["ch_out"] = mix_ch_out
+                    mix_eff_cycle = self.hw_model("analog", **conv_shape)
                 else:
                     # if ch_out != 0:
-                    eff_cycle = self.hw_model('digital', **conv_shape)
-                    conv_shape['ch_out'] = mix_ch_out
-                    mix_eff_cycle = self.hw_model('digital', **conv_shape)
+                    eff_cycle = self.hw_model("digital", **conv_shape)
+                    conv_shape["ch_out"] = mix_ch_out
+                    mix_eff_cycle = self.hw_model("digital", **conv_shape)
                 eff_cycles[bit] = eff_cycle
                 mix_eff_cycles[bit] = mix_eff_cycle
             slowest_eff_cycle = sum(list(eff_cycles.values()))
             slowest_mix_eff_cycle = sum(list(mix_eff_cycles.values()))
         else:
-            if self.fc == 'fixed':
+            if self.fc == "fixed":
                 best_wbit = 8
                 best_weight = 8
                 # mac_cycle = self.hw_model('digital')
-            elif self.fc == 'mixed':
+            elif self.fc == "mixed":
                 best_wbit = wbits[best_weight]
                 # mac_cycle = self.hw_model('digital')
 
@@ -1778,12 +2317,12 @@ class MultiPrecActivConv2d(nn.Module):
             else:
                 best_abits = [abits[i] for i in best_activ]
             best_wbits = [[wbits[i] for i in best_weight]]
-            best_arch = {'best_activ': best_abits, 'best_weight': best_wbits}
+            best_arch = {"best_activ": best_abits, "best_weight": best_wbits}
             # bitops = size_product * abits[best_activ] * best_wbit
             bita = memory_size * abits[best_activ]
         else:
             raise NotImplementedError
-            best_arch = {'best_activ': [8], 'best_weight': [best_weight]}
+            best_arch = {"best_activ": [8], "best_weight": [best_weight]}
             # bitops = size_product * 8 * best_wbit
             bita = memory_size * 8
 
