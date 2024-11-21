@@ -55,7 +55,7 @@ if [[ "$6" == "ft" ]]; then
         -d cifar10 --epochs 200 --step-epoch 50 -b 128 --patience 500 \
         --lr 0.0001 --wd 1e-4 \
         --seed 42 --gpu 0 \
-        --ac ${arch}/model_${strength}/${timestamp}/arch_model_best.pth.tar -ft \
+        --ac ${path}/${arch}/model_${strength}/${timestamp}/arch_model_best.pth.tar -ft \
         --visualization -pr ${project} --tags ${tags} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_finetune_${strength}.txt
 else
     echo From-Scratch

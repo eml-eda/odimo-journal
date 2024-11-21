@@ -263,6 +263,7 @@ def init_scale_param(model):
                     qm.SharedMultiPrecConv2d,
                     qm2.SharedMultiPrecConv2d,
                     qm2.SharedMixQuantChanConv2d,
+                    qm2.QuantMixChanConv2d,
                 ),
             ):
                 w = module.conv.weight
