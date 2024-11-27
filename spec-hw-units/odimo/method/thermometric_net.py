@@ -49,31 +49,29 @@ class ThermometricNet(DNAS):
     Default to 'std'.
     :type warmup_strategy: Literal['std', 'coarse', 'fine']
     """
+
     def __init__(
-            self,
-            model: nn.Module,
-            input_shape: Tuple[int, ...],
-            regularizer: str = 'latency',
-            cost: Literal['naive', 'darkside', 'darkside-power'] = 'naive',
-            init_strategy: Literal['half', '1st', '2nd'] = 'half',
-            warmup_strategy: Literal['std', 'coarse', 'fine'] = 'std'
-            ):
+        self,
+        model: nn.Module,
+        input_shape: Tuple[int, ...],
+        regularizer: str = "latency",
+        cost: Literal["naive", "darkside", "darkside-power"] = "naive",
+        init_strategy: Literal["half", "1st", "2nd"] = "half",
+        warmup_strategy: Literal["std", "coarse", "fine"] = "std",
+    ):
         super(ThermometricNet, self).__init__(regularizer)
 
         self._input_shape = input_shape
         self._regularizer = regularizer
         self._cost = cost
-        self.seed, self._target_combiners = convert(
-            model,
-            self._input_shape
-        )
+        self.seed, self._target_combiners = convert(model, self._input_shape)
         # Init
         self._init_strategy = init_strategy
         self.set_init_strategy(strategy=self.init_strategy)
         # Set cost
         self.set_cost(cost=self._cost)
         # Set phase
-        self._phase = 'warmup'
+        self._phase = "warmup"
         self._warmup_strategy = warmup_strategy
         self.change_train_phase(phase=self.phase, strategy=self.warmup_strategy)
 
@@ -94,7 +92,7 @@ class ThermometricNet(DNAS):
         :return: a tuple of strings with the name of supported regularizers
         :rtype: Tuple[str, ...]
         """
-        return ('size', 'macs', 'latency')
+        return ("size", "macs", "latency")
 
     def freeze_alpha(self):
         """Freeze the alpha coefficients disabling the gradient computation.
@@ -103,6 +101,11 @@ class ThermometricNet(DNAS):
         for combiner in self._target_combiners:
             _, layer = combiner
             layer.alpha.requires_grad = False
+            if layer.supernet_ablation:
+                # Transform alpha in one-hot vector with one in the argmax position
+                alpha = nn.Parameter(torch.zeros_like(layer.alpha), requires_grad=False)
+                alpha[torch.argmax(layer.alpha)] = 1.0
+                layer.alpha = alpha
 
     def get_size(self) -> torch.Tensor:
         """Computes the total number of parameters of all NAS-able modules
@@ -164,19 +167,22 @@ class ThermometricNet(DNAS):
 
         return lat
 
-    def set_init_strategy(self, strategy: Literal['1st', '2nd', 'half']):
+    def set_init_strategy(self, strategy: Literal["1st", "2nd", "half"]):
         for _, module in self._target_combiners:
             module = cast(ThermometricCombiner, module)
             module.init_strategy = strategy
             module.init_alpha()
 
-    def set_cost(self, cost: Literal['naive', 'darkside', 'darkside-power']):
+    def set_cost(self, cost: Literal["naive", "darkside", "darkside-power"]):
         for _, module in self._target_combiners:
             module = cast(ThermometricCombiner, module)
             module.update_cost_fn(cost)
 
-    def change_train_phase(self, phase: Literal['warmup', 'search'],
-                           strategy: Literal['std', 'coarse', 'fine']):
+    def change_train_phase(
+        self,
+        phase: Literal["warmup", "search"],
+        strategy: Literal["std", "coarse", "fine"],
+    ):
         for _, module in self._target_combiners:
             module = cast(ThermometricCombiner, module)
             module.phase = phase
@@ -184,27 +190,27 @@ class ThermometricNet(DNAS):
             module.update_combiner_behavior(phase=phase, strategy=strategy)
 
     @property
-    def init_strategy(self) -> Literal['1st', '2nd', 'half']:
+    def init_strategy(self) -> Literal["1st", "2nd", "half"]:
         return self._init_strategy
 
     @init_strategy.setter
-    def init_strategy(self, val: Literal['1st', '2nd', 'half']):
+    def init_strategy(self, val: Literal["1st", "2nd", "half"]):
         self._init_strategy = val
 
     @property
-    def phase(self) -> Literal['warmup', 'search']:
+    def phase(self) -> Literal["warmup", "search"]:
         return self._phase
 
     @phase.setter
-    def phase(self, val: Literal['warmup', 'search']):
+    def phase(self, val: Literal["warmup", "search"]):
         self._phase = val
 
     @property
-    def warmup_strategy(self) -> Literal['coarse', 'fine']:
+    def warmup_strategy(self) -> Literal["coarse", "fine"]:
         return self._warmup_strategy
 
     @warmup_strategy.setter
-    def warmup_strategy(self, val: Literal['coarse', 'fine']):
+    def warmup_strategy(self, val: Literal["coarse", "fine"]):
         self._warmup_strategy = val
 
     @property
@@ -219,11 +225,11 @@ class ThermometricNet(DNAS):
 
     @regularizer.setter
     def regularizer(self, value: str):
-        if value == 'size':
+        if value == "size":
             self.get_regularization_loss = self.get_size
-        elif value == 'macs':
+        elif value == "macs":
             self.get_regularization_loss = self.get_macs
-        elif value == 'latency':
+        elif value == "latency":
             self.get_regularization_loss = self.get_latency
         else:
             raise ValueError(f"Invalid regularizer {value}")
@@ -237,7 +243,7 @@ class ThermometricNet(DNAS):
         :rtype: nn.Module
         """
         model = self.seed
-        model, _ = convert(model, self._input_shape, 'export')
+        model, _ = convert(model, self._input_shape, "export")
         return model
 
     def arch_summary(self) -> Dict[str, Dict[str, Any]]:
@@ -251,11 +257,12 @@ class ThermometricNet(DNAS):
         for name, layer in self._target_combiners:
             layer = cast(ThermometricCombiner, layer)
             arch[name] = layer.summary()
-            arch[name]['type'] = layer.__class__.__name__
+            arch[name]["type"] = layer.__class__.__name__
         return arch
 
     def named_nas_parameters(
-            self, prefix: str = '', recurse: bool = False) -> Iterator[Tuple[str, nn.Parameter]]:
+        self, prefix: str = "", recurse: bool = False
+    ) -> Iterator[Tuple[str, nn.Parameter]]:
         """Returns an iterator over the architectural parameters of the NAS, yielding
         both the name of the parameter as well as the parameter itself
 
@@ -276,7 +283,8 @@ class ThermometricNet(DNAS):
                 yield prfx, param
 
     def named_net_parameters(
-            self, prefix: str = '', recurse: bool = True) -> Iterator[Tuple[str, nn.Parameter]]:
+        self, prefix: str = "", recurse: bool = True
+    ) -> Iterator[Tuple[str, nn.Parameter]]:
         """Returns an iterator over the inner network parameters, EXCEPT the NAS architectural
         parameters, yielding both the name of the parameter as well as the parameter itself
 

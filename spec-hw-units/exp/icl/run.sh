@@ -2,7 +2,7 @@
 
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
-path="."
+path="/space/risso/odimo_rebuttal/darkside"
 
 strength=$1
 arch=$2
