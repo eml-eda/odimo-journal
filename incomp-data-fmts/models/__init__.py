@@ -17,7 +17,9 @@
 # * Author:  Matteo Risso <matteo.risso@polito.it>                             *
 # *----------------------------------------------------------------------------*
 
-from .mixmobilenetv1 import * # noqa 
-from .mixresnet import * # noqa
-from .quant_mobilenetv1 import * # noqa
-from .quant_resnet import * # noqa
+from .mixmobilenetv1 import *  # noqa
+from .mixresnet import *  # noqa
+from .mixtemponet import *  # noqa
+from .quant_mobilenetv1 import *  # noqa
+from .quant_resnet import *  # noqa
+from .quant_temponet import *  # noqa

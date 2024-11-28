@@ -495,7 +495,7 @@ class QuantAvgPool2d(nn.Module):
 
         # Pooling
         self.kernel_size = kernel_size
-        self.pool = nn.AvgPool2d(kernel_size)
+        self.pool = nn.AvgPool2d(kernel_size, kwargs.get("stride", None))
 
     def forward(self, x):
         q_x, _ = self.mix_activ(x)

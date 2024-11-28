@@ -44,10 +44,10 @@ python main.py --arch ${arch} --checkpoint-dir ${path}/${arch}_init_${init}_warm
                --finetune-again \
                --finetune-scratch | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
 
-python main.py --arch ${arch} --checkpoint-dir ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp} \
-               --epochs 500 --init-strategy ${init} \
-               --warmup --warmup-strategy ${wmup} \
-               --cost ${cost} \
-               --search --strength ${strength} --seed ${seed} \
-               --finetune \
-               --finetune-again | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
+# python main.py --arch ${arch} --checkpoint-dir ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp} \
+#                --epochs 500 --init-strategy ${init} \
+#                --warmup --warmup-strategy ${wmup} \
+#                --cost ${cost} \
+#                --search --strength ${strength} --seed ${seed} \
+#                --finetune \
+#                --finetune-again | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
