@@ -53,8 +53,8 @@ if [[ "$6" == "ft" ]]; then
         --visualization -pr ${project} --tags ${tags} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_finetune_${strength}.txt
 else
     echo From-Scratch
-    # pretrained_model="warmup20_fp.pth.tar"
-    pretrained_model="."
+    pretrained_model="warmup_fp.pth.tar"
+    # pretrained_model="."
     python3 main.py ${path}/${arch}/model_${strength}/${timestamp} -a quant${arch} \
         -d dalia --epochs 500 --step-epoch 50 -b 128 --patience 20 \
         --lr 0.001 \

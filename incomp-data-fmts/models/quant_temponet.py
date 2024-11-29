@@ -34,11 +34,11 @@ from . import hw_models as hw
 
 __all__ = [
     "quanttemponet_fp",
-    # "quanttemponet_fp_foldbn",
-    # "quanttemponet_w8a7_pow2_foldbn",
-    # "quanttemponet_w2a7_pow2_foldbn",
-    # "quanttemponet_w2a7_true_pow2_foldbn",
-    # "quanttemponet_pow2_diana_full",
+    "quanttemponet_fp_foldbn",
+    "quanttemponet_w8a7_pow2_foldbn",
+    "quanttemponet_w2a7_pow2_foldbn",
+    "quanttemponet_w2a7_true_pow2_foldbn",
+    "quanttemponet_pow2_diana_full",
 ]
 
 
@@ -84,6 +84,7 @@ class TempConvBlock(nn.Module):
             dilation=dil,
             padding=pad,
             bias=self.use_bias,
+            groups=1,
             **kwargs,
         )
 
@@ -143,6 +144,7 @@ class ConvBlock(nn.Module):
             dilation=dilation,
             padding=pad,
             bias=self.use_bias,
+            groups=1,
             **kwargs,
         )
         if self.fp:
@@ -198,6 +200,7 @@ class Regressor(nn.Module):
             stride=(1, 1),
             bias=self.use_bias,
             fc=qtz_fc,
+            groups=1,
             **kwargs,
         )
         if self.use_bn:
@@ -272,8 +275,8 @@ class TEMPONet(nn.Module):
             wbits=archws[0],
             bias=self.use_bias,
             bn=self.bn,
-            max_inp_val=1.0,
-            first_layer=True,
+            max_inp_val=kwargs.pop("max_inp_val", 1.0),
+            signed=True,
             **kwargs,
         )
         k_tcb01 = ceil(self.rf[1] / self.dil[1])
@@ -431,6 +434,7 @@ class TEMPONet(nn.Module):
             wbits=archws[11],
             bias=True,
             fc=self.qtz_fc,
+            groups=1,
             **kwargs,
         )
 
@@ -512,4 +516,247 @@ def quanttemponet_fp(arch_cfg_path, **kwargs):
         qtz_fc="multi",
         **kwargs,
     )
+    return model
+
+
+def quanttemponet_fp_foldbn(arch_cfg_path, **kwargs):
+    # Check `arch_cfg_path` existence
+    if not Path(arch_cfg_path).exists():
+        print(f"The file {arch_cfg_path} does not exist.")
+        raise FileNotFoundError
+
+    archas, archws = [[8]] * 12, [[8]] * 12
+    model = TEMPONet(qm.FpConv2d, None, archws, archas, qtz_fc="multi", **kwargs)
+    fp_state_dict = torch.load(arch_cfg_path)["state_dict"]
+    model.load_state_dict(fp_state_dict)
+
+    model.eval()  # Model must be in eval mode to fold bn
+    folded_model = utils.fold_bn(model)
+    folded_model.train()  # Put folded model in train mode
+
+    return folded_model
+
+
+def quanttemponet_w8a7_pow2_foldbn(arch_cfg_path, **kwargs):
+    # Check `arch_cfg_path` existence
+    if not Path(arch_cfg_path).exists():
+        print(f"The file {arch_cfg_path} does not exist.")
+        raise FileNotFoundError
+
+    archas, archws = [[7]] * 12, [[8]] * 12
+    s_up = kwargs.pop("analog_speedup", 5.0)
+    fp_model = TEMPONet(
+        qm.FpConv2d,
+        hw.diana(analog_speedup=s_up),
+        archws,
+        archas,
+        qtz_fc="multi",
+        **kwargs,
+    )
+    q_model = TEMPONet(
+        qm2.QuantMultiPrecActivConv2d,
+        hw.diana(analog_speedup=s_up),
+        archws,
+        archas,
+        qtz_fc="multi",
+        bn=False,
+        **kwargs,
+    )
+
+    # Load pretrained fp state_dict
+    fp_state_dict = torch.load(arch_cfg_path)["state_dict"]
+    fp_model.load_state_dict(fp_state_dict)
+    # Fold bn
+    fp_model.eval()  # Model must be in eval mode to fold bn
+    folded_model = utils.fold_bn(fp_model)
+    folded_state_dict = folded_model.state_dict()
+
+    # Delete fp and folded model
+    del fp_model, folded_model
+
+    # Translate folded fp state dict in a format compatible with quantized layers
+    q_state_dict = utils.fpfold_to_q(folded_state_dict)
+    # Load folded fp state dict in quantized model
+    q_model.load_state_dict(q_state_dict, strict=False)
+
+    # Init scale param
+    utils.init_scale_param(q_model)
+
+    return q_model
+
+
+def quanttemponet_w2a7_pow2_foldbn(arch_cfg_path, target="latency", **kwargs):
+    # Check `arch_cfg_path` existence
+    if not Path(arch_cfg_path).exists():
+        print(f"The file {arch_cfg_path} does not exist.")
+        raise FileNotFoundError
+
+    archas, archws = [[7]] * 12, [[2]] * 12
+    # Set first and last layer weights precision to 8bit
+    archws[0] = [8]
+    archws[-1] = [8]
+    s_up = kwargs.pop("analog_speedup", 5.0)
+    fp_model = TEMPONet(
+        qm.FpConv2d,
+        hw.diana(analog_speedup=s_up),
+        archws,
+        archas,
+        qtz_fc="multi",
+        **kwargs,
+    )
+    q_model = TEMPONet(
+        qm2.QuantMultiPrecActivConv2d,
+        hw.diana(analog_speedup=s_up),
+        archws,
+        archas,
+        qtz_fc="multi",
+        bn=False,
+        target=target,
+        **kwargs,
+    )
+
+    # Load pretrained fp state_dict
+    fp_state_dict = torch.load(arch_cfg_path)["state_dict"]
+    fp_model.load_state_dict(fp_state_dict)
+    # Fold bn
+    fp_model.eval()  # Model must be in eval mode to fold bn
+    folded_model = utils.fold_bn(fp_model)
+    folded_state_dict = folded_model.state_dict()
+
+    # Delete fp and folded model
+    del fp_model, folded_model
+
+    # Translate folded fp state dict in a format compatible with quantized layers
+    q_state_dict = utils.fpfold_to_q(folded_state_dict)
+    # Load folded fp state dict in quantized model
+    q_model.load_state_dict(q_state_dict, strict=False)
+
+    # Init scale param
+    utils.init_scale_param(q_model)
+
+    return q_model
+
+
+def quanttemponet_w2a7_true_pow2_foldbn(arch_cfg_path, target="latency", **kwargs):
+    # Check `arch_cfg_path` existence
+    if not Path(arch_cfg_path).exists():
+        print(f"The file {arch_cfg_path} does not exist.")
+        raise FileNotFoundError
+
+    archas, archws = [[7]] * 12, [[2]] * 12
+    archws[-1] = [8]
+    s_up = kwargs.pop("analog_speedup", 5.0)
+    fp_model = TEMPONet(
+        qm.FpConv2d,
+        hw.diana(analog_speedup=s_up),
+        archws,
+        archas,
+        qtz_fc="multi",
+        **kwargs,
+    )
+    q_model = TEMPONet(
+        qm2.QuantMultiPrecActivConv2d,
+        hw.diana(analog_speedup=s_up),
+        archws,
+        archas,
+        qtz_fc="multi",
+        bn=False,
+        target=target,
+        **kwargs,
+    )
+
+    # Load pretrained fp state_dict
+    fp_state_dict = torch.load(arch_cfg_path)["state_dict"]
+    fp_model.load_state_dict(fp_state_dict)
+    # Fold bn
+    fp_model.eval()  # Model must be in eval mode to fold bn
+    folded_model = utils.fold_bn(fp_model)
+    folded_state_dict = folded_model.state_dict()
+
+    # Delete fp and folded model
+    del fp_model, folded_model
+
+    # Translate folded fp state dict in a format compatible with quantized layers
+    q_state_dict = utils.fpfold_to_q(folded_state_dict)
+    # Load folded fp state dict in quantized model
+    q_model.load_state_dict(q_state_dict, strict=False)
+
+    # Init scale param
+    utils.init_scale_param(q_model)
+
+    return q_model
+
+
+def quanttemponet_pow2_diana_full(arch_cfg_path, **kwargs):
+    wbits, abits = [8, 2], [7]
+
+    # ## This block of code is only necessary to comply with the underlying EdMIPS code ##
+    best_arch, worst_arch = _load_arch_multi_prec(arch_cfg_path)
+    archas = [abits for a in best_arch["alpha_activ"]]
+    archws = [wbits for w_ch in best_arch["alpha_weight"]]
+    # if len(archws) == 21:
+    #     # Case of fixed-precision on last fc layer
+    #     archws.append(8)
+    # assert len(archas) == 22  # 10 insead of 8 because conv1 and fc activations are also quantized
+    # assert len(archws) == 22  # 10 instead of 8 because conv1 and fc weights are also quantized
+    ##
+
+    kwargs.pop("analog_speedup", 5.0)
+    model = TEMPONet(
+        qm2.QuantMultiPrecActivConv2d,
+        hw.diana(),
+        archws,
+        archas,
+        qtz_fc="multi",
+        bn=False,
+        **kwargs,
+    )
+    utils.init_scale_param(model)
+
+    return _quanttemponet_diana(arch_cfg_path, model, **kwargs)
+
+
+def _load_arch_multi_prec(arch_path):
+    checkpoint = torch.load(arch_path, map_location="cpu")
+    # state_dict = checkpoint["model_state_dict"]
+    state_dict = checkpoint["state_dict"]
+    best_arch, worst_arch = {}, {}
+    best_arch["alpha_activ"], worst_arch["alpha_activ"] = [], []
+    best_arch["alpha_weight"], worst_arch["alpha_weight"] = [], []
+    for name, params in state_dict.items():
+        name = name.split(".")[-1]
+        if name == "alpha_activ":
+            alpha = params.cpu().numpy()
+            best_arch[name].append(alpha.argmax())
+            worst_arch[name].append(alpha.argmin())
+        elif name == "alpha_weight":
+            alpha = params.cpu().numpy()
+            best_arch[name].append(alpha.argmax(axis=0))
+            worst_arch[name].append(alpha.argmin(axis=0))
+
+    return best_arch, worst_arch
+
+
+def _load_alpha_state_dict(arch_path):
+    checkpoint = torch.load(arch_path)
+    state_dict = checkpoint["state_dict"]
+    alpha_state_dict = dict()
+    for name, params in state_dict.items():
+        full_name = name
+        name = name.split(".")[-1]
+        if name == "alpha_activ" or name == "alpha_weight":
+            alpha_state_dict[full_name] = params
+
+    return alpha_state_dict
+
+
+def _quanttemponet_diana(arch_cfg_path, model, **kwargs):
+    if kwargs.get("fine_tune", True):
+        # Load all weights
+        state_dict = torch.load(arch_cfg_path)["state_dict"]
+        model.load_state_dict(state_dict)
+    else:
+        # Load only alphas weights
+        alpha_state_dict = _load_alpha_state_dict(arch_cfg_path)
+        model.load_state_dict(alpha_state_dict, strict=False)
     return model

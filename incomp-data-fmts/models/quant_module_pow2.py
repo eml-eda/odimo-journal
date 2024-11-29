@@ -225,6 +225,46 @@ class LearnedClippedLinearQuantizeSTE(torch.autograd.Function):
         return grad_input, grad_alpha, None, None, None, None
 
 
+class LearnedSignedClippedLinearQuantizeSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx, input, clip_val, clip_val_inf, num_bits, dequantize, inplace, round_pow2
+    ):
+        ctx.save_for_backward(input, clip_val, clip_val_inf)
+        if inplace:
+            ctx.mark_dirty(input)
+        scale_factor = asymmetric_linear_quantization_scale_factor(
+            num_bits, clip_val_inf.data[0], clip_val.data[0]
+        )
+        if round_pow2:
+            scale_factor = torch.exp2(torch.floor(torch.log2(scale_factor)))
+            clip_val.data[0] = (2**num_bits - 1) / scale_factor
+        output = clamp(input, clip_val_inf.data[0], clip_val.data[0], inplace)
+        output = linear_quantize(output, scale_factor, inplace)
+        if dequantize:
+            output = linear_dequantize(output, scale_factor, inplace)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, clip_val, clip_val_inf = ctx.saved_tensors
+        grad_input = grad_output.clone()
+        grad_input.masked_fill_(x.le(0), 0)
+        grad_input.masked_fill_(x.ge(clip_val.data[0]), 0)
+
+        grad_alpha = grad_output.clone()
+        grad_alpha.masked_fill_(x.lt(clip_val.data[0]), 0)
+        #        grad_alpha[x.lt(clip_val.data[0])] = 0
+        grad_alpha = grad_alpha.sum().expand_as(clip_val)
+
+        grad_alpha_inf = grad_output.clone()
+        grad_alpha_inf.masked_fill_(x.gt(clip_val_inf.data[0]), 0)
+        grad_alpha_inf = grad_alpha_inf.sum().expand_as(clip_val_inf)
+
+        # Straight-through estimator for the scale factor calculation
+        return grad_input, grad_alpha, grad_alpha_inf, None, None, None, None
+
+
 # DJP (w.r.t Manuele's code I changed inplace to false to avoid error)
 class LearnedClippedLinearQuantization(nn.Module):
     def __init__(
@@ -234,24 +274,39 @@ class LearnedClippedLinearQuantization(nn.Module):
         dequantize=True,
         inplace=False,
         round_pow2=False,
+        signed=False,
     ):
         super(LearnedClippedLinearQuantization, self).__init__()
         self.num_bits = num_bits
+        self.signed = signed
         self.clip_val = nn.Parameter(torch.Tensor([init_act_clip_val]))
+        if signed:
+            self.clip_val_inf = nn.Parameter(torch.Tensor([-init_act_clip_val]))
         self.dequantize = dequantize
         self.inplace = inplace
         self.round_pow2 = round_pow2
 
     def forward(self, x):
-        input = LearnedClippedLinearQuantizeSTE.apply(
-            x,
-            self.clip_val,
-            self.num_bits,
-            self.dequantize,
-            self.inplace,
-            self.round_pow2,
-        )
-        return input
+        if self.signed:
+            out = LearnedSignedClippedLinearQuantizeSTE.apply(
+                x,
+                self.clip_val,
+                self.clip_val_inf,
+                self.num_bits,
+                self.dequantize,
+                self.inplace,
+                self.round_pow2,
+            )
+        else:
+            out = LearnedClippedLinearQuantizeSTE.apply(
+                x,
+                self.clip_val,
+                self.num_bits,
+                self.dequantize,
+                self.inplace,
+                self.round_pow2,
+            )
+        return out
 
     def __repr__(self):
         inplace_str = ", inplace" if self.inplace else ""
@@ -697,6 +752,7 @@ class QuantMultiPrecActivConv2d(nn.Module):
         super().__init__()
         self.fine_tune = kwargs.pop("fine_tune", False)
         self.first_layer = kwargs.pop("first_layer", False)
+        self.signed = kwargs.pop("signed", False)
         self.fc = fc
 
         self.abits = abits
@@ -711,7 +767,9 @@ class QuantMultiPrecActivConv2d(nn.Module):
         # max_inp_val = kwargs.pop('max_inp_val', 6.)
         max_inp_val = kwargs.pop("max_inp_val", 6.0)
         round_pow2 = kwargs.pop("round_pow2", True)  # TODO: in general should be False
-        self.mix_activ = QuantPaCTActiv(abits, max_inp_val, round_pow2)
+        self.mix_activ = QuantPaCTActiv(
+            abits, max_inp_val, round_pow2, signed=self.signed
+        )
         # self.mix_activ = QuantFQActiv(abits)
         if not fc:
             self.mix_weight = QuantMultiPrecConv2d(
@@ -742,7 +800,7 @@ class QuantMultiPrecActivConv2d(nn.Module):
                 )
 
         # complexities
-        self.stride = kwargs["stride"] if "stride" in kwargs else 1
+        self.stride = kwargs["stride"][0] if "stride" in kwargs else 1
         if isinstance(kwargs["kernel_size"], tuple):
             kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
             self.k_x = kwargs["kernel_size"][0]
@@ -766,11 +824,11 @@ class QuantMultiPrecActivConv2d(nn.Module):
         self.memory_size.copy_(memory_size(in_shape))
         # tmp = torch.tensor(self.filter_size * in_shape[-1] * in_shape[-2], dtype=torch.float)
         self.size_product.copy_(size_product(self.filter_size, in_shape))
-        if not self.first_layer:
+        if True:  # if not self.first_layer:
             out, act_scale = self.mix_activ(input)
-        else:
-            out = _channel_asym_min_max_quantize.apply(input, 8)
-            act_scale = None
+        # else:
+        #     out = _channel_asym_min_max_quantize.apply(input, 7)
+        #     act_scale = None
         out = self.mix_weight(out, act_scale)
         out_shape = out.shape
         self.out_x = out_shape[-2]
@@ -881,7 +939,7 @@ class QuantFQActiv(nn.Module):
 # MR
 class QuantPaCTActiv(nn.Module):
 
-    def __init__(self, bits, max_inp_val=6.0, round_pow2=False):
+    def __init__(self, bits, max_inp_val=6.0, round_pow2=False, signed=False):
         super(QuantPaCTActiv, self).__init__()
         if type(bits) == int:
             self.bits = [bits]
@@ -891,10 +949,14 @@ class QuantPaCTActiv(nn.Module):
         self.alpha_activ = Parameter(torch.Tensor(len(self.bits)), requires_grad=False)
         self.alpha_activ.data.fill_(0.01)
         self.mix_activ = nn.ModuleList()
+        self.signed = signed
         for bit in self.bits:
             self.mix_activ.append(
                 LearnedClippedLinearQuantization(
-                    num_bits=bit, init_act_clip_val=max_inp_val, round_pow2=round_pow2
+                    num_bits=bit,
+                    init_act_clip_val=max_inp_val,
+                    round_pow2=round_pow2,
+                    signed=signed,
                 )
             )
 
@@ -906,7 +968,10 @@ class QuantPaCTActiv(nn.Module):
         for i, branch in enumerate(self.mix_activ):
             # torch.nan_to_num() necessary to avoid nan in the output when multiplying by zero
             outs.append(torch.nan_to_num(branch(input)) * sw[i])
-            act_scale.append(branch.clip_val)
+            if self.signed:
+                act_scale.append(branch.clip_val - branch.clip_val_inf)
+            else:
+                act_scale.append(branch.clip_val)
         activ = sum(outs)
         return activ, torch.stack(act_scale)
 
@@ -1213,7 +1278,9 @@ class QuantMixChanConv2d(nn.Module):
 # DJP
 class MixQuantPaCTActiv(nn.Module):
 
-    def __init__(self, bits, max_inp_val=6.0, round_pow2=False, gumbel=False):
+    def __init__(
+        self, bits, max_inp_val=6.0, round_pow2=False, gumbel=False, signed=False
+    ):
         super().__init__()
         self.bits = bits
         self.gumbel = gumbel
@@ -1223,7 +1290,10 @@ class MixQuantPaCTActiv(nn.Module):
         for bit in self.bits:
             self.mix_activ.append(
                 LearnedClippedLinearQuantization(
-                    num_bits=bit, init_act_clip_val=max_inp_val, round_pow2=round_pow2
+                    num_bits=bit,
+                    init_act_clip_val=max_inp_val,
+                    round_pow2=round_pow2,
+                    signed=signed,
                 )
             )
 
@@ -1528,7 +1598,7 @@ class MixPrecActivConv2d(nn.Module):
         self.reg_target = kwargs.pop("reg_target", "cycle")
 
         self.input_qtz = kwargs.pop("fix_qtz", False)
-
+        self.signed = kwargs.pop("signed", False)
         self.search_types = ["fixed", "mixed", "multi"]
         if fc in self.search_types:
             self.fc = fc
@@ -1543,7 +1613,7 @@ class MixPrecActivConv2d(nn.Module):
 
         # build mix-precision branches
         self.mix_activ = MixQuantPaCTActiv(
-            self.abits, max_inp_val, round_pow2, gumbel=self.gumbel
+            self.abits, max_inp_val, round_pow2, gumbel=self.gumbel, signed=self.signed
         )
         # for multiprec, only share-weight is feasible
         assert share_weight

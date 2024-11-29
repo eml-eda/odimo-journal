@@ -308,6 +308,9 @@ def main_worker(gpu, ngpus_per_node, args):
     dataloaders = hrd.build_dataloaders(datasets, seed=args.seed)
     train_dl, val_dl, test_dl = dataloaders
 
+    # Get max (abs) input val
+    max_inp_val = max(abs(datasets[0].samples.flatten()))
+
     # create model
     print("=> creating model '{}'".format(args.arch))
     if len(args.arch_cfg) > 0:
@@ -316,7 +319,7 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             print("=> no architecture found at '{}'".format(args.arch_cfg))
     model_fn = models.__dict__[args.arch]
-    model = model_fn(args.arch_cfg, fine_tune=args.fine_tune)
+    model = model_fn(args.arch_cfg, fine_tune=args.fine_tune, max_inp_val=max_inp_val)
 
     if args.distributed:
         # For multiprocessing distributed, DistributedDataParallel constructor
@@ -409,7 +412,6 @@ def main_worker(gpu, ngpus_per_node, args):
     epoch_wout_improve = 0
 
     for epoch in range(args.start_epoch, args.epochs):
-
         # train for one epoch
         train(train_dl, model, criterion, optimizer, q_optimizer, epoch, args)
 

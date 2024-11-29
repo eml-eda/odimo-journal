@@ -898,6 +898,7 @@ class FpConv2d(nn.Module):
         self.wbits = wbits
 
         self.first_layer = kwargs.pop("first_layer", False)
+        self.signed = kwargs.pop("signed", False)
 
         self.fine_tune = kwargs.pop("fine_tune", False)
         self.fc = kwargs.pop("fc", False)
