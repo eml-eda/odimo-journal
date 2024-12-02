@@ -1891,12 +1891,18 @@ class MultiPrecActivConv2d(nn.Module):
         self.gumbel = kwargs.pop("gumbel", False)
         self.temp = 1
 
+        self.signed = kwargs.pop("signed", False)
+
         max_inp_val = kwargs.pop("max_inp_val", 6.0)
         round_pow2 = kwargs.pop("round_pow2", True)  # TODO: in general should be False
 
         # build mix-precision branches
         self.mix_activ = MixQuantPaCTActiv(
-            self.abits, max_inp_val, round_pow2, gumbel=self.gumbel
+            self.abits,
+            max_inp_val,
+            round_pow2,
+            gumbel=self.gumbel,
+            signed=self.signed,
         )
         # for multiprec, only share-weight is feasible
         assert share_weight
@@ -1925,7 +1931,7 @@ class MultiPrecActivConv2d(nn.Module):
                 )
 
         # complexities
-        self.stride = kwargs["stride"] if "stride" in kwargs else 1
+        self.stride = kwargs["stride"][0] if "stride" in kwargs else 1
         if isinstance(kwargs["kernel_size"], tuple):
             kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
             self.k_x = kwargs["kernel_size"][0]
@@ -1935,10 +1941,10 @@ class MultiPrecActivConv2d(nn.Module):
             self.k_x = kwargs["kernel_size"]
             self.k_y = kwargs["kernel_size"]
         self.ch_in = inplane
-        self.groups = kwargs["groups"]
+        self.groups = kwargs["groups"] if "groups" in kwargs else 1
         self.out_x = None
         self.out_y = None
-        self.param_size = inplane * outplane * kernel_size / kwargs["groups"] * 1e-6
+        self.param_size = inplane * outplane * kernel_size / self.groups * 1e-6
         self.filter_size = self.param_size / float(self.stride**2.0)
         self.register_buffer("size_product", torch.tensor(0, dtype=torch.float))
         self.register_buffer("memory_size", torch.tensor(0, dtype=torch.float))

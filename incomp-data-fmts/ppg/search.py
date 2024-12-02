@@ -71,6 +71,12 @@ parser.add_argument(
     help="model architecture: " + " | ".join(model_names) + " (default: resnet8)",
 )
 parser.add_argument(
+    "--arch-data-split",
+    type=float,
+    default=None,
+    help="Split of the data to use for the update of alphas",
+)
+parser.add_argument(
     "-j",
     "--workers",
     default=4,
@@ -437,7 +443,7 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    criterion = hrd.get_default_criterion()
 
     # group model/architecture parameters
     params, alpha_params, q_params = [], [], []

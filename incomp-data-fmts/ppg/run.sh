@@ -3,8 +3,8 @@
 strength=$1
 path="/space/risso/odimo_rebuttal/diana_ppg"
 
-pretrained_model=""
-# pretrained_model="warmup20_fp.pth.tar"
+# pretrained_model=""
+pretrained_model="warmup_fp.pth.tar"
 arch=$2
 target=$3
 
@@ -32,10 +32,10 @@ if [[ "$5" == "search" ]]; then
     echo Search
     split=0.0
     # NB: add --warmup-8bit if needed
-    python3 search_r20.py ${path}/${arch}/model_${strength}/${timestamp} -a mix${arch} \
-        -d cifar10 --arch-data-split ${split} \
-        --epochs 200 --step-epoch 50 -b 128 -j 4 \
-        --ac ${pretrained_model} --patience 50 \
+    python3 search.py ${path}/${arch}/model_${strength}/${timestamp} -a mix${arch} \
+        -d dalia --arch-data-split ${split} \
+        --epochs 500 --step-epoch 50 -b 128 -j 4 \
+        --ac ${pretrained_model} --patience 20 \
         --lr 0.001 --lra 0.001 --wd 1e-4 \
         --ai same --cd ${strength} --target ${target} \
         --seed 42 --gpu 0 \
@@ -45,8 +45,8 @@ fi
 
 if [[ "$6" == "ft" ]]; then
     echo Fine-Tune
-    python3 main_r20.py ${path}/${arch}/model_${strength}/${timestamp} -a quant${arch} \
-        -d cifar10 --epochs 200 --step-epoch 50 -b 128 --patience 500 \
+    python3 main.py ${path}/${arch}/model_${strength}/${timestamp} -a quant${arch} \
+        -d dalia --epochs 500 --step-epoch 50 -b 128 --patience 20 \
         --lr 0.0001 --wd 1e-4 \
         --seed 42 --gpu 0 \
         --ac ${path}/${arch}/model_${strength}/${timestamp}/arch_model_best.pth.tar -ft \

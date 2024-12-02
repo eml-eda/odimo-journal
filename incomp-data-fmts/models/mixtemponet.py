@@ -181,8 +181,6 @@ class Regressor(nn.Module):
         is_searchable,
         ft_in,
         ft_out,
-        abits,
-        wbits,
         bias,
         bn,
         search_fc=None,
@@ -404,7 +402,7 @@ class TEMPONet(nn.Module):
             ft_out=self.ch[9],
             bias=self.use_bias,
             bn=self.bn,
-            qtz_fc=self.qtz_fc,
+            search_fc=self.search_fc,
             kernel_size=(4, 1),
             **kwargs,
         )
@@ -418,7 +416,7 @@ class TEMPONet(nn.Module):
             ft_out=self.ch[10],
             bias=self.use_bias,
             bn=self.bn,
-            qtz_fc=self.qtz_fc,
+            search_fc=self.search_fc,
             **kwargs,
         )
 
@@ -430,7 +428,7 @@ class TEMPONet(nn.Module):
             kernel_size=(1, 1),
             stride=(1, 1),
             bias=True,
-            fc=self.qtz_fc,
+            fc=self.search_fc,
             target=target,
             **kwargs,
         )
@@ -458,49 +456,46 @@ class TEMPONet(nn.Module):
         x = self.out_neuron(x, temp, is_hard)[:, :, 0, 0]
         return x
 
-    def _fetch_arch_latency(self):
-        sum_cycles, sum_bita, sum_bitw = 0, 0, 0
-        layer_idx = 0
+    def complexity_loss(self):
+        loss = torch.tensor(0.0)
         for m in self.modules():
             if isinstance(m, self.conv_func):
-                size_product = m.size_product.item()
-                memory_size = m.memory_size.item()
-                wbit = m.wbits[0]
-                abit = m.abits[0]
-                sum_bitw += size_product * wbit
+                loss = loss + m.complexity_loss()
+        return loss
 
-                cycles_analog, cycles_digital = 0, 0
-                for idx, wb in enumerate(m.wbits):
-                    if len(m.wbits) > 1:
-                        ch_out = m.mix_weight.alpha_weight[idx].sum()
-                    else:
-                        ch_out = torch.tensor(m.ch_out)
-                    # Define dict whit shape infos used to model accelerators perf
-                    conv_shape = {
-                        "ch_in": m.ch_in,
-                        "ch_out": ch_out,
-                        "groups": m.mix_weight.conv.groups,
-                        "k_x": m.k_x,
-                        "k_y": m.k_y,
-                        "out_x": m.out_x,
-                        "out_y": m.out_y,
-                    }
-                    if wb == 2:
-                        cycles_analog = self.hw_model("analog", **conv_shape)
-                    else:
-                        cycles_digital = self.hw_model("digital", **conv_shape)
-                if m.mix_weight.conv.groups == 1:
-                    cycles = max(cycles_analog, cycles_digital)
+    def fetch_best_arch(self):
+        sum_cycles, sum_bita, sum_bitw = 0, 0, 0
+        sum_mixcycles, sum_mixbita, sum_mixbitw = 0, 0, 0
+        layer_idx = 0
+        best_arch = None
+        for m in self.modules():
+            if isinstance(m, self.conv_func):
+                outs = m.fetch_best_arch(layer_idx)  # Return tuple
+                layer_arch, cycles, bita, bitw, mixcycles, mixbita, mixbitw = outs
+                if best_arch is None:
+                    best_arch = layer_arch
                 else:
-                    cycles = cycles_digital
-
-                bita = memory_size * abit
-                bitw = m.param_size * wbit
+                    for key in layer_arch.keys():
+                        if key not in best_arch:
+                            best_arch[key] = layer_arch[key]
+                        else:
+                            best_arch[key].append(layer_arch[key][0])
                 sum_cycles += cycles
                 sum_bita += bita
                 sum_bitw += bitw
+                sum_mixcycles += mixcycles
+                sum_mixbita += mixbita
+                sum_mixbitw += mixbitw
                 layer_idx += 1
-        return sum_cycles, sum_bita, sum_bitw
+        return (
+            best_arch,
+            sum_cycles,
+            sum_bita,
+            sum_bitw,
+            sum_mixcycles,
+            sum_mixbita,
+            sum_mixbitw,
+        )
 
 
 def mixtemponet_pow2_diana_full(arch_cfg_path, target="latency", **kwargs):
