@@ -4,7 +4,6 @@ strength=$1
 path="/space/risso/odimo_rebuttal/diana_ppg"
 
 # pretrained_model=""
-pretrained_model="warmup_fp.pth.tar"
 arch=$2
 target=$3
 
@@ -28,6 +27,9 @@ mkdir -p ${path}/${arch}/model_${strength}/${timestamp}
 
 export WANDB_MODE=offline
 
+subject=9
+pretrained_model="warmup_fp_s${subject}.pth.tar"
+
 if [[ "$5" == "search" ]]; then
     echo Search
     split=0.0
@@ -36,28 +38,31 @@ if [[ "$5" == "search" ]]; then
         -d dalia --arch-data-split ${split} \
         --epochs 500 --step-epoch 50 -b 128 -j 4 \
         --ac ${pretrained_model} --patience 20 \
-        --lr 0.001 --lra 0.001 --wd 1e-4 \
+        --lr 0.001 --lra 0.0005 --wd 1e-4 \
         --ai same --cd ${strength} --target ${target} \
         --seed 42 --gpu 0 \
         --no-gumbel-softmax --temperature 1 --anneal-temp \
-        --visualization -pr ${project} --tags ${tags} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_search_${strength}.txt
+        --visualization -pr ${project} --tags ${tags} \
+        --subject ${subject} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_search_${strength}.txt
 fi
 
 if [[ "$6" == "ft" ]]; then
     echo Fine-Tune
     python3 main.py ${path}/${arch}/model_${strength}/${timestamp} -a quant${arch} \
         -d dalia --epochs 500 --step-epoch 50 -b 128 --patience 20 \
-        --lr 0.0001 --wd 1e-4 \
+        --lr 0.001 --wd 1e-4 \
         --seed 42 --gpu 0 \
         --ac ${path}/${arch}/model_${strength}/${timestamp}/arch_model_best.pth.tar -ft \
-        --visualization -pr ${project} --tags ${tags} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_finetune_${strength}.txt
+        --visualization -pr ${project} --tags ${tags} \
+        --subject ${subject} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_finetune_${strength}.txt
 else
     echo From-Scratch
-    pretrained_model="warmup_fp.pth.tar"
+    # pretrained_model="warmup_fp.pth.tar"
     # pretrained_model="."
     python3 main.py ${path}/${arch}/model_${strength}/${timestamp} -a quant${arch} \
         -d dalia --epochs 500 --step-epoch 50 -b 128 --patience 20 \
         --lr 0.001 \
         --seed 42 --gpu 0 \
-        --ac ${pretrained_model} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_fromscratch_${strength}.txt
+        --ac ${pretrained_model} \
+        --subject ${subject} | tee ${path}/${arch}/model_${strength}/${timestamp}/log_fromscratch_${strength}.txt
 fi

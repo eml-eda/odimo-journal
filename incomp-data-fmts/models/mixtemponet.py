@@ -69,6 +69,8 @@ class TempConvBlock(nn.Module):
         self.use_bn = bn
         self.fp = conv_func is qm.FpConv2d
         super().__init__()
+        if not is_searchable:
+            kwargs["wbits"] = [8]
         self.tcn = conv_func(
             hw_model,
             ch_in,
@@ -131,6 +133,8 @@ class ConvBlock(nn.Module):
         self.use_bn = bn
         self.fp = conv_func is qm.FpConv2d
         super(ConvBlock, self).__init__()
+        if not is_searchable:
+            kwargs["wbits"] = [8]
         self.conv = conv_func(
             hw_model,
             ch_in,
@@ -192,6 +196,8 @@ class Regressor(nn.Module):
         self.use_bn = bn
         self.fp = conv_func is qm.FpConv2d
         super().__init__()
+        if not is_searchable:
+            kwargs["wbits"] = [8]
         self.fc = conv_func(
             hw_model,
             ft_in,
@@ -354,7 +360,7 @@ class TEMPONet(nn.Module):
         self.tcb20 = TempConvBlock(
             conv_func=self.conv_func,
             hw_model=self.hw_model,
-            is_searchable=is_searchable[5],
+            is_searchable=is_searchable[6],
             ch_in=self.ch[5],
             ch_out=self.ch[6],
             k_size=(k_tcb20, 1),
@@ -368,7 +374,7 @@ class TEMPONet(nn.Module):
         self.tcb21 = TempConvBlock(
             conv_func=self.conv_func,
             hw_model=self.hw_model,
-            is_searchable=is_searchable[6],
+            is_searchable=is_searchable[7],
             ch_in=self.ch[6],
             ch_out=self.ch[7],
             k_size=(k_tcb21, 1),
@@ -381,7 +387,7 @@ class TEMPONet(nn.Module):
         self.cb2 = ConvBlock(
             conv_func=self.conv_func,
             hw_model=self.hw_model,
-            is_searchable=is_searchable[7],
+            is_searchable=is_searchable[8],
             ch_in=self.ch[7],
             ch_out=self.ch[8],
             k_size=(5, 1),
@@ -397,7 +403,7 @@ class TEMPONet(nn.Module):
         self.regr0 = Regressor(
             conv_func=self.conv_func,
             hw_model=self.hw_model,
-            is_searchable=is_searchable[8],
+            is_searchable=is_searchable[9],
             ft_in=self.ch[8],
             ft_out=self.ch[9],
             bias=self.use_bias,
@@ -411,7 +417,7 @@ class TEMPONet(nn.Module):
         self.regr1 = Regressor(
             conv_func=self.conv_func,
             hw_model=self.hw_model,
-            is_searchable=is_searchable[9],
+            is_searchable=is_searchable[10],
             ft_in=self.ch[9],
             ft_out=self.ch[10],
             bias=self.use_bias,
@@ -421,6 +427,8 @@ class TEMPONet(nn.Module):
         )
 
         # Output layer
+        if not is_searchable[11]:
+            kwargs["wbits"] = [8]
         self.out_neuron = conv_func(
             hw_model,
             self.ch[10],
@@ -500,10 +508,12 @@ class TEMPONet(nn.Module):
 
 def mixtemponet_pow2_diana_full(arch_cfg_path, target="latency", **kwargs):
     # NB: 2 bits is equivalent for ternary weights!!
+    # is_searchable = [False] + [True] * 10 + [False]
+    is_searchable = [True] * 12
     search_model = TEMPONet(
         qm2.MultiPrecActivConv2d,
         hw.diana(),
-        [True] * 22,
+        is_searchable,
         search_fc="multi",
         wbits=[8, 2],
         abits=[7],

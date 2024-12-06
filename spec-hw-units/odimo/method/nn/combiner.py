@@ -490,8 +490,8 @@ class ThermometricCombiner(nn.Module):
         # NB: torch.tensor() does not preserve gradients!!!
         t_cycles = torch.stack(cycles)
         # Compute softmax
-        temp = 1e7
-        # temp = 1
+        # temp = 1e7
+        temp = 1
         s_c = F.softmax(t_cycles / temp, dim=0)
         t_c = torch.dot(s_c, t_cycles)
 
@@ -503,8 +503,8 @@ class ThermometricCombiner(nn.Module):
             p_dwe = POWER_DARKSIDE["DWE"] * t_cycles[1]
             return p_idle + p_gap8 + p_dwe
 
-        # return t_c
-        return max(cycles)
+        return t_c
+        # return max(cycles)
 
     def get_latency_supernet(self, hard: bool = False) -> torch.Tensor:
         device = self.alpha.device

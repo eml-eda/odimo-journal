@@ -292,6 +292,7 @@ parser.add_argument(
     action="store_true",
     help="enable additional visualizations useful for debugging",
 )
+parser.add_argument("--subject", default="3", type=str, help="subject to use")
 
 best_mae = 0
 
@@ -387,8 +388,9 @@ def main_worker(gpu, ngpus_per_node, args):
     # Get the data
     data_dir = args.data.parent.parent.parent / "data"
     data_gen = hrd.get_data(data_dir=data_dir, cross_val=True)
-    datasets = next(data_gen)
-    test_subj = datasets[2].test_subj
+    for datasets in data_gen:
+        if datasets[2].test_subj == int(args.subject):
+            break
     dataloaders = hrd.build_dataloaders(datasets, seed=args.seed)
     train_dl, val_dl, test_dl = dataloaders
 

@@ -701,6 +701,8 @@ def quanttemponet_pow2_diana_full(arch_cfg_path, **kwargs):
     # assert len(archws) == 22  # 10 instead of 8 because conv1 and fc weights are also quantized
     ##
 
+    # archws[0] = [8]
+    # archws[-1] = [8]
     kwargs.pop("analog_speedup", 5.0)
     model = TEMPONet(
         qm2.QuantMultiPrecActivConv2d,
