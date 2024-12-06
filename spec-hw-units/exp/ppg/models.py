@@ -368,7 +368,7 @@ def temponet_dw():
 
 
 def temponet_conv():
-    return TEMPONet(conv_block=ConvBlock)
+    return TEMPONet(conv_block=StdConvBlock)
 
 
 def temponet_search():

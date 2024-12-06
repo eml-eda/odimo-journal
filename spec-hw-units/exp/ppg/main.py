@@ -218,6 +218,7 @@ def main(args):
     CHECKPOINT_DIR = pathlib.Path(args.checkpoint_dir)
     N_EPOCHS = args.epochs
     LAMBDA = torch.tensor(args.strength)
+    SUBJECT = int(args.subject)
 
     # Check CUDA availability
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -229,8 +230,9 @@ def main(args):
     # Get the Data
     data_dir = pathlib.Path(DATA_DIR)
     data_gen = hrd.get_data(data_dir=data_dir, cross_val=True)
-    datasets = next(data_gen)
-    test_subj = datasets[2].test_subj
+    for datasets in data_gen:
+        if datasets[2].test_subj == SUBJECT:
+            break
     dataloaders = hrd.build_dataloaders(datasets, seed=args.seed)
     train_dl, val_dl, test_dl = dataloaders
 
@@ -421,5 +423,6 @@ if __name__ == "__main__":
         help="Whether to perform again finetune",
     )
     parser.add_argument("--seed", type=int, default=14, help="Random Seed")
+    parser.add_argument("--subject", default="3", type=str, help="subject to use")
     args = parser.parse_args()
     main(args)

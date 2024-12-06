@@ -24,6 +24,8 @@ else
     cost="naive"
 fi
 
+subject=9
+
 mkdir -p ${save_path}/${arch}_init_${init}_warmup_${wmup}
 mkdir -p ${save_path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}
 
@@ -32,7 +34,8 @@ python main.py --arch ${arch} --checkpoint-dir ${save_path}/${arch}_init_${init}
                --epochs 500 --init-strategy ${init} \
                --warmup --warmup-strategy ${wmup} \
                --cost ${cost} \
-               --strength ${strength} --seed ${seed} | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
+               --strength ${strength} --seed ${seed} \
+               --subject ${subject} | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
 
 # python main.py --arch ${arch} --checkpoint-dir ${save_path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost} \
 #                --data-dir ${data_path} ${timestamp} \
@@ -48,4 +51,5 @@ python main.py --arch ${arch} --checkpoint-dir ${save_path}/${arch}_init_${init}
                --warmup --warmup-strategy ${wmup} \
                --cost ${cost} \
                --search --strength ${strength} --seed ${seed} \
-               --finetune --finetune-scratch | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
+               --finetune --finetune-scratch \
+               --subject ${subject} | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt

@@ -17,7 +17,9 @@ seed=$3
 mkdir -p ${path}/${arch}
 mkdir -p ${path}/${arch}/${timestamp}
 
+subject=9
+
 python baseline.py --arch ${arch} --checkpoint-dir ${path}/${arch}/${timestamp} \
                    --data-dir ${path} \
                    --epochs 500 --seed ${seed} \
-                   | tee -a ${path}/${arch}/${timestamp}/log.txt
+                  --subject ${subject} | tee -a ${path}/${arch}/${timestamp}/log.txt
