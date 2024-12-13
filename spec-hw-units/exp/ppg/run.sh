@@ -3,7 +3,7 @@
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 data_path="/space/risso/odimo_rebuttal/darkside_ppg"
-save_path="/space/risso/odimo_rebuttal/darkside_ppg"
+save_path="/space/risso/odimo_rebuttal/darkside_ppg/subj9"
 
 strength=$1
 arch=$2
@@ -35,7 +35,7 @@ python main.py --arch ${arch} --checkpoint-dir ${save_path}/${arch}_init_${init}
                --warmup --warmup-strategy ${wmup} \
                --cost ${cost} \
                --strength ${strength} --seed ${seed} \
-               --subject ${subject} | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
+               --subject ${subject} | tee -a ${save_path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
 
 # python main.py --arch ${arch} --checkpoint-dir ${save_path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost} \
 #                --data-dir ${data_path} ${timestamp} \
@@ -52,4 +52,4 @@ python main.py --arch ${arch} --checkpoint-dir ${save_path}/${arch}_init_${init}
                --cost ${cost} \
                --search --strength ${strength} --seed ${seed} \
                --finetune --finetune-scratch \
-               --subject ${subject} | tee -a ${path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt
+               --subject ${subject} | tee -a ${save_path}/${arch}_init_${init}_warmup_${wmup}/model_${strength}_${cost}/${timestamp}/log.txt

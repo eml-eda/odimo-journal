@@ -53,8 +53,7 @@ parser.add_argument(
 args = parser.parse_args()
 print(args)
 
-model_name = str(args.arch).split("quant")[1].split("_")[0]
-
+# model_name = str(args.arch).split("quant")[1].split("_")[0]
 # Build and Load pretrained model if specified
 if args.pretrained_model is not None:
     if "mix" in args.arch:

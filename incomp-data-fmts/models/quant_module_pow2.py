@@ -800,7 +800,10 @@ class QuantMultiPrecActivConv2d(nn.Module):
                 )
 
         # complexities
-        self.stride = kwargs["stride"][0] if "stride" in kwargs else 1
+        if isinstance(kwargs["kernel_size"], tuple):
+            self.stride = kwargs["stride"][0] if "stride" in kwargs else 1
+        else:
+            self.stride = kwargs["stride"] if "stride" in kwargs else 1
         if isinstance(kwargs["kernel_size"], tuple):
             kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
             self.k_x = kwargs["kernel_size"][0]
@@ -1931,7 +1934,10 @@ class MultiPrecActivConv2d(nn.Module):
                 )
 
         # complexities
-        self.stride = kwargs["stride"][0] if "stride" in kwargs else 1
+        if isinstance(kwargs["kernel_size"], tuple):
+            self.stride = kwargs["stride"][0] if "stride" in kwargs else 1
+        else:
+            self.stride = kwargs["stride"] if "stride" in kwargs else 1
         if isinstance(kwargs["kernel_size"], tuple):
             kernel_size = kwargs["kernel_size"][0] * kwargs["kernel_size"][1]
             self.k_x = kwargs["kernel_size"][0]
@@ -2195,32 +2201,32 @@ class MultiPrecActivConv2d(nn.Module):
                     mix_wbit += prob_weight[i] * wbits[i]
 
         weight_shape = list(self.mix_weight.conv.weight.shape)
-        print(
-            "idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
-            "memory: {:.3f}K * {:.3f}".format(
-                layer_idx,
-                weight_shape,
-                prob_activ,
-                size_product,
-                mix_abit,
-                mix_wbit,
-                memory_size,
-                mix_abit,
-            )
-        )
-        print(
-            "idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
-            "param: {:.3f}M * {:.3f}".format(
-                layer_idx,
-                weight_shape,
-                prob_weight,
-                size_product,
-                mix_abit,
-                mix_wbit,
-                self.param_size,
-                mix_wbit,
-            )
-        )
+        # print(
+        #     "idx {} with shape {}, activ alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+        #     "memory: {:.3f}K * {:.3f}".format(
+        #         layer_idx,
+        #         weight_shape,
+        #         prob_activ,
+        #         size_product,
+        #         mix_abit,
+        #         mix_wbit,
+        #         memory_size,
+        #         mix_abit,
+        #     )
+        # )
+        # print(
+        #     "idx {} with shape {}, weight alpha: {}, comp: {:.3f}M * {:.3f} * {:.3f}, "
+        #     "param: {:.3f}M * {:.3f}".format(
+        #         layer_idx,
+        #         weight_shape,
+        #         prob_weight,
+        #         size_product,
+        #         mix_abit,
+        #         mix_wbit,
+        #         self.param_size,
+        #         mix_wbit,
+        #     )
+        # )
 
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
