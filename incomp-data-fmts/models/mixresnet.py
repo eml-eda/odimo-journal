@@ -679,15 +679,21 @@ class ResNet20(nn.Module):
                 loss = loss + m.complexity_loss()
         return loss
 
-    def fetch_best_arch(self):
+    def fetch_best_arch(self, detailed=False):
         sum_cycles, sum_bita, sum_bitw = 0, 0, 0
         sum_mixcycles, sum_mixbita, sum_mixbitw = 0, 0, 0
         layer_idx = 0
         best_arch = None
+        cycles_dict = {}
         for m in self.modules():
             if isinstance(m, self.conv_func):
-                outs = m.fetch_best_arch(layer_idx)  # Return tuple
-                layer_arch, cycles, bita, bitw, mixcycles, mixbita, mixbitw = outs
+                outs = m.fetch_best_arch(layer_idx, detailed)  # Return tuple
+                if detailed:
+                    cycles, cycles_dict[layer_idx] = outs
+                    layer_idx += 1
+                    continue
+                else:
+                    layer_arch, cycles, bita, bitw, mixcycles, mixbita, mixbitw = outs
                 if best_arch is None:
                     best_arch = layer_arch
                 else:
@@ -703,6 +709,8 @@ class ResNet20(nn.Module):
                 sum_mixbita += mixbita
                 sum_mixbitw += mixbitw
                 layer_idx += 1
+        if detailed:
+            return cycles, cycles_dict
         return (
             best_arch,
             sum_cycles,

@@ -2155,7 +2155,7 @@ class MultiPrecActivConv2d(nn.Module):
         e_tot = sum(t_cycles)
         return e_tot
 
-    def _fetch_best_arch_latency(self, layer_idx):
+    def _fetch_best_arch_latency(self, layer_idx, detailed=False):
         size_product = float(self.size_product.cpu().numpy())
         memory_size = float(self.memory_size.cpu().numpy())
 
@@ -2228,6 +2228,7 @@ class MultiPrecActivConv2d(nn.Module):
         #     )
         # )
 
+        cycles_dict = {}
         # Define dict where shapes informations needed to model accelerators perf
         conv_shape = {
             "ch_in": self.ch_in,
@@ -2250,16 +2251,19 @@ class MultiPrecActivConv2d(nn.Module):
                 if bit == 2:
                     # if ch_out != 0:
                     eff_cycle = self.hw_model("analog", **conv_shape)
+                    cycles_dict["analog"] = eff_cycle
                     conv_shape["ch_out"] = mix_ch_out
                     mix_eff_cycle = self.hw_model("analog", **conv_shape)
                 else:
                     # if ch_out != 0:
                     eff_cycle = self.hw_model("digital", **conv_shape)
+                    cycles_dict["digital"] = eff_cycle
                     conv_shape["ch_out"] = mix_ch_out
                     mix_eff_cycle = self.hw_model("digital", **conv_shape)
                 eff_cycles.append(eff_cycle)
                 mix_eff_cycles.append(mix_eff_cycle)
             slowest_eff_cycle = max(eff_cycles)
+            cycles_dict["max"] = slowest_eff_cycle
             slowest_mix_eff_cycle = max(mix_eff_cycles)
         else:
             if self.fc == "fixed":
@@ -2292,6 +2296,8 @@ class MultiPrecActivConv2d(nn.Module):
         mixbita = memory_size * mix_abit
         mixbitw = self.param_size * mix_wbit
 
+        if detailed:
+            return cycles, cycles_dict
         return best_arch, cycles, bita, bitw, mixcycles, mixbita, mixbitw
         # return best_arch, bitops, bita, bitw, mixbitops, mixbita, mixbitw
 

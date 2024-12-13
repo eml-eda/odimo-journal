@@ -480,8 +480,10 @@ def main_worker(gpu, ngpus_per_node, args):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
+        end = time.time()
         # train for one epoch
         train(train_loader, model, criterion, optimizer, q_optimizer, epoch, args)
+        print(f"Elapsed time: {time.time() - end}")
 
         # evaluate on validation set
         acc1 = validate(val_loader, model, criterion, epoch, args)

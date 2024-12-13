@@ -691,9 +691,11 @@ class ResNet20(nn.Module):
                 if isinstance(module, self.conv_func):
                     module.store_hardened_weights()
 
-    def _fetch_arch_latency(self):
+    def _fetch_arch_latency(self, detailed=False):
         sum_cycles, sum_bita, sum_bitw = 0, 0, 0
         layer_idx = 0
+        if detailed:
+            cycles_dict = {}
         for m in self.modules():
             if isinstance(m, self.conv_func):
                 size_product = m.size_product.item()
@@ -724,6 +726,12 @@ class ResNet20(nn.Module):
                         cycles_digital = self.hw_model("digital", **conv_shape)
                 if m.mix_weight.conv.groups == 1:
                     cycles = max(cycles_analog, cycles_digital)
+                    if detailed:
+                        cycles_dict[layer_idx] = {
+                            "analog": cycles_analog,
+                            "digital": cycles_digital,
+                            "max": cycles,
+                        }
                 else:
                     cycles = cycles_digital
 
@@ -733,6 +741,8 @@ class ResNet20(nn.Module):
                 sum_bita += bita
                 sum_bitw += bitw
                 layer_idx += 1
+        if detailed:
+            return sum_cycles, cycles_dict
         return sum_cycles, sum_bita, sum_bitw
 
     def _fetch_arch_power(self):
