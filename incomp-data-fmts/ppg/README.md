@@ -14,4 +14,4 @@ Thus, overall, this experiment shows ODiMO's generality from three different ang
 
 Please note that these results are preliminary, indeed, we evaluated the ODiMO approach on two randomly selected subjects (Subjects 3 and 9).
 
-![Preliminary Results](/odimo-journal/incomp-data-fmts/ppg/diana_ppg_dalia.png)
+![Preliminary Results](diana_ppg_dalia.png)
