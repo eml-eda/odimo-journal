@@ -1,0 +1,44 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: DIANA PIT",
+            "type": "debugpy",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/incomp-data-fmts/image_classification/cifar10",
+            "program": "pit_r20.py",
+            "console": "integratedTerminal",
+            "env": {
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "CUDA_VISIBLE_DEVICES": "0",
+            },
+            "args": [
+                "/space/risso/odimo_rebuttal/diana/debug/now",
+                "--seed",
+                "42",
+                "--strength",
+                "1e-6"
+            ]
+        },
+        {
+            "name": "Python Debugger: DIANA Dig after PIT",
+            "type": "debugpy",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/incomp-data-fmts/image_classification/cifar10",
+            "program": "dig_after_pit_r20.py",
+            "console": "integratedTerminal",
+            "env": {
+                "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+                "CUDA_VISIBLE_DEVICES": "0",
+            },
+            "args": [
+                "/space/risso/odimo_rebuttal/diana/model_1e-6/2024-11-18-19:03:29",
+                "--seed",
+                "42",
+            ]
+        }
+    ]
+}

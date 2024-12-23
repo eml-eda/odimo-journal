@@ -24,24 +24,46 @@ import torch.nn as nn
 from odimo.method import ThermometricModule
 
 __all__ = [
-    'mbv1_dw_8', 'mbv1_dws_8', 'mbv1_conv_8', 'mbv1_search_8',
-    'mbv1_dw_16', 'mbv1_dws_16', 'mbv1_conv_16', 'mbv1_search_16', 'mbv1_search_notherm_16',
-    'mbv1_dw_32', 'mbv1_dws_32', 'mbv1_conv_32', 'mbv1_search_32',
-    'mbv1_search_32_dw_dws', 'mbv1_search_32_dws_conv',
+    "mbv1_dw_8",
+    "mbv1_dws_8",
+    "mbv1_conv_8",
+    "mbv1_search_8",
+    "mbv1_dw_16",
+    "mbv1_dws_16",
+    "mbv1_conv_16",
+    "mbv1_search_16",
+    "mbv1_search_notherm_16",
+    "mbv1_dw_32",
+    "mbv1_dws_32",
+    "mbv1_conv_32",
+    "mbv1_search_32",
+    "mbv1_supernet_32",
+    "mbv1_search_32_dw_dws",
+    "mbv1_search_32_dws_conv",
 ]
 
 
 class ConvBlock(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,
-                 groups=1, **kwargs):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        groups=1,
+        **kwargs
+    ):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels,
-                               out_channels,
-                               kernel_size=kernel_size,
-                               stride=stride,
-                               padding=padding,
-                               bias=False,
-                               groups=groups)
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=False,
+            groups=groups,
+        )
         nn.init.kaiming_normal_(self.conv1.weight)
         self.bn = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU()
@@ -52,15 +74,18 @@ class ConvBlock(torch.nn.Module):
 
 
 class DWBlock(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,
-                 **kwargs):
+    def __init__(
+        self, in_channels, out_channels, kernel_size, stride, padding, **kwargs
+    ):
         super().__init__()
-        self.depthwise = ConvBlock(in_channels=in_channels,
-                                   out_channels=in_channels,
-                                   kernel_size=kernel_size,
-                                   stride=stride,
-                                   padding=padding,
-                                   groups=in_channels)
+        self.depthwise = ConvBlock(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=in_channels,
+        )
 
     def forward(self, input):
         x = self.depthwise(input)
@@ -68,20 +93,25 @@ class DWBlock(torch.nn.Module):
 
 
 class DWSBlock(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,
-                 **kwargs):
+    def __init__(
+        self, in_channels, out_channels, kernel_size, stride, padding, **kwargs
+    ):
         super().__init__()
-        self.depthwise = ConvBlock(in_channels=in_channels,
-                                   out_channels=in_channels,
-                                   kernel_size=kernel_size,
-                                   stride=stride,
-                                   padding=padding,
-                                   groups=in_channels)
-        self.pointwise = ConvBlock(in_channels=in_channels,
-                                   out_channels=out_channels,
-                                   kernel_size=1,
-                                   stride=1,
-                                   padding=0)
+        self.depthwise = ConvBlock(
+            in_channels=in_channels,
+            out_channels=in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            groups=in_channels,
+        )
+        self.pointwise = ConvBlock(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
 
     def forward(self, input):
         x = self.depthwise(input)
@@ -90,15 +120,74 @@ class DWSBlock(torch.nn.Module):
 
 
 class SearchableBlock(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,
-                 thermometric: bool = True):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        thermometric: bool = True,
+    ):
         super().__init__()
-        self.block = ThermometricModule([
-            ConvBlock(in_channels=in_channels, out_channels=out_channels,
-                      kernel_size=kernel_size, stride=stride, padding=padding),
-            DWBlock(in_channels=in_channels, out_channels=out_channels,
-                    kernel_size=kernel_size, stride=stride, padding=padding)
-        ], out_channels=out_channels, thermometric=thermometric)
+        self.block = ThermometricModule(
+            [
+                ConvBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+                DWBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+            ],
+            out_channels=out_channels,
+            thermometric=thermometric,
+        )
+
+    def forward(self, input):
+        x = self.block(input)
+        return x
+
+
+class SupernetBlock(torch.nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        thermometric: bool = True,
+    ):
+        super().__init__()
+        self.block = ThermometricModule(
+            [
+                ConvBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+                DWBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+            ],
+            out_channels=out_channels,
+            thermometric=thermometric,
+            supernet_ablation=True,
+        )
 
     def forward(self, input):
         x = self.block(input)
@@ -106,15 +195,36 @@ class SearchableBlock(torch.nn.Module):
 
 
 class SearchableBlockDwDws(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,
-                 thermometric: bool = True):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        thermometric: bool = True,
+    ):
         super().__init__()
-        self.block = ThermometricModule([
-            DWSBlock(in_channels=in_channels, out_channels=out_channels,
-                     kernel_size=kernel_size, stride=stride, padding=padding),
-            DWBlock(in_channels=in_channels, out_channels=out_channels,
-                    kernel_size=kernel_size, stride=stride, padding=padding)
-        ], out_channels=out_channels, thermometric=thermometric)
+        self.block = ThermometricModule(
+            [
+                DWSBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+                DWBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+            ],
+            out_channels=out_channels,
+            thermometric=thermometric,
+        )
 
     def forward(self, input):
         x = self.block(input)
@@ -122,15 +232,36 @@ class SearchableBlockDwDws(torch.nn.Module):
 
 
 class SearchableBlockDwsConv(torch.nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,
-                 thermometric: bool = True):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        thermometric: bool = True,
+    ):
         super().__init__()
-        self.block = ThermometricModule([
-            ConvBlock(in_channels=in_channels, out_channels=out_channels,
-                      kernel_size=kernel_size, stride=stride, padding=padding),
-            DWSBlock(in_channels=in_channels, out_channels=out_channels,
-                     kernel_size=kernel_size, stride=stride, padding=padding)
-        ], out_channels=out_channels, thermometric=thermometric)
+        self.block = ThermometricModule(
+            [
+                ConvBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+                DWSBlock(
+                    in_channels=in_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                ),
+            ],
+            out_channels=out_channels,
+            thermometric=thermometric,
+        )
 
     def forward(self, input):
         x = self.block(input)
@@ -138,12 +269,15 @@ class SearchableBlockDwsConv(torch.nn.Module):
 
 
 class MobileNet(torch.nn.Module):
-    def __init__(self, input_shape: Tuple, num_classes: int,
-                 thermometric: List[bool] = [True] * 8,
-                 conv_block: nn.Module = DWSBlock,
-                 features: int = 8,
-                 initial_stride: int = 2
-                 ):
+    def __init__(
+        self,
+        input_shape: Tuple,
+        num_classes: int,
+        thermometric: List[bool] = [True] * 8,
+        conv_block: nn.Module = DWSBlock,
+        features: int = 8,
+        initial_stride: int = 2,
+    ):
         super().__init__()
 
         # Parameters #
@@ -154,76 +288,170 @@ class MobileNet(torch.nn.Module):
 
         # Layers #
         # Oth layer
-        self.layer0 = ConvBlock(in_channels=self.inp_filters,
-                                out_channels=features,
-                                kernel_size=3, stride=initial_stride, padding=1)
+        self.layer0 = ConvBlock(
+            in_channels=self.inp_filters,
+            out_channels=features,
+            kernel_size=3,
+            stride=initial_stride,
+            padding=1,
+        )
         # 1st layer
-        self.dw1 = ConvBlock(in_channels=features, out_channels=features,
-                             kernel_size=3, stride=1, padding=1,
-                             groups=features)
-        self.pw1 = ConvBlock(in_channels=features, out_channels=2*features,
-                             kernel_size=1, stride=1, padding=0)
+        self.dw1 = ConvBlock(
+            in_channels=features,
+            out_channels=features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            groups=features,
+        )
+        self.pw1 = ConvBlock(
+            in_channels=features,
+            out_channels=2 * features,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
         # 2nd layer
-        self.dw2 = ConvBlock(in_channels=2*features, out_channels=2*features,
-                             kernel_size=3, stride=2, padding=1,
-                             groups=2*features)
-        self.pw2 = ConvBlock(in_channels=2*features, out_channels=4*features,
-                             kernel_size=1, stride=1, padding=0)
+        self.dw2 = ConvBlock(
+            in_channels=2 * features,
+            out_channels=2 * features,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            groups=2 * features,
+        )
+        self.pw2 = ConvBlock(
+            in_channels=2 * features,
+            out_channels=4 * features,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
         # 3rd layer
-        self.layer3 = conv_block(in_channels=4*features, out_channels=4*features,
-                                 kernel_size=3, stride=1, padding=1,
-                                 thermometric=thermometric[0])
+        self.layer3 = conv_block(
+            in_channels=4 * features,
+            out_channels=4 * features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            thermometric=thermometric[0],
+        )
         # 4th layer
-        self.dw4 = ConvBlock(in_channels=4*features, out_channels=4*features,
-                             kernel_size=3, stride=2, padding=1,
-                             groups=4*features)
-        self.pw4 = ConvBlock(in_channels=4*features, out_channels=8*features,
-                             kernel_size=1, stride=1, padding=0)
+        self.dw4 = ConvBlock(
+            in_channels=4 * features,
+            out_channels=4 * features,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            groups=4 * features,
+        )
+        self.pw4 = ConvBlock(
+            in_channels=4 * features,
+            out_channels=8 * features,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
         # 5th layer
-        self.layer5 = conv_block(in_channels=8*features, out_channels=8*features,
-                                 kernel_size=3, stride=1, padding=1,
-                                 thermometric=thermometric[1])
+        self.layer5 = conv_block(
+            in_channels=8 * features,
+            out_channels=8 * features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            thermometric=thermometric[1],
+        )
         # 6th layer
-        self.dw6 = ConvBlock(in_channels=8*features, out_channels=8*features,
-                             kernel_size=3, stride=2, padding=1,
-                             groups=8*features)
-        self.pw6 = ConvBlock(in_channels=8*features, out_channels=16*features,
-                             kernel_size=1, stride=1, padding=0)
+        self.dw6 = ConvBlock(
+            in_channels=8 * features,
+            out_channels=8 * features,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            groups=8 * features,
+        )
+        self.pw6 = ConvBlock(
+            in_channels=8 * features,
+            out_channels=16 * features,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
         # 7th layer
-        self.layer7 = conv_block(in_channels=16*features, out_channels=16*features,
-                                 kernel_size=3, stride=1, padding=1,
-                                 thermometric=thermometric[2])
+        self.layer7 = conv_block(
+            in_channels=16 * features,
+            out_channels=16 * features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            thermometric=thermometric[2],
+        )
         # 8th layer
-        self.layer8 = conv_block(in_channels=16*features, out_channels=16*features,
-                                 kernel_size=3, stride=1, padding=1,
-                                 thermometric=thermometric[3])
+        self.layer8 = conv_block(
+            in_channels=16 * features,
+            out_channels=16 * features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            thermometric=thermometric[3],
+        )
         # 9th layer
-        self.layer9 = conv_block(in_channels=16*features, out_channels=16*features,
-                                 kernel_size=3, stride=1, padding=1,
-                                 thermometric=thermometric[4])
+        self.layer9 = conv_block(
+            in_channels=16 * features,
+            out_channels=16 * features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            thermometric=thermometric[4],
+        )
         # 10th layer
-        self.layer10 = conv_block(in_channels=16*features, out_channels=16*features,
-                                  kernel_size=3, stride=1, padding=1,
-                                  thermometric=thermometric[5])
+        self.layer10 = conv_block(
+            in_channels=16 * features,
+            out_channels=16 * features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            thermometric=thermometric[5],
+        )
         # 11th layer
-        self.layer11 = conv_block(in_channels=16*features, out_channels=16*features,
-                                  kernel_size=3, stride=1, padding=1,
-                                  thermometric=thermometric[6])
+        self.layer11 = conv_block(
+            in_channels=16 * features,
+            out_channels=16 * features,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            thermometric=thermometric[6],
+        )
         # 12th layer
-        self.dw12 = ConvBlock(in_channels=16*features, out_channels=16*features,
-                              kernel_size=3, stride=2, padding=1,
-                              groups=16*features)
-        self.pw12 = ConvBlock(in_channels=16*features, out_channels=32*features,
-                              kernel_size=1, stride=1, padding=0)
+        self.dw12 = ConvBlock(
+            in_channels=16 * features,
+            out_channels=16 * features,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            groups=16 * features,
+        )
+        self.pw12 = ConvBlock(
+            in_channels=16 * features,
+            out_channels=32 * features,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+        )
         # 13th layer
-        self.layer13 = conv_block(in_channels=32*features, out_channels=32*features,
-                                  kernel_size=3, stride=1, padding=1,
-                                  thermometric=thermometric[7])  # previously -> stride=2?
+        self.layer13 = conv_block(
+            in_channels=32 * features,
+            out_channels=32 * features,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            thermometric=thermometric[7],
+        )  # previously -> stride=2?
         # Classifier
         self.avgpool = torch.nn.AdaptiveAvgPool2d(1)
-        self.out = nn.Linear(32*features, num_classes)
-        # nn.init.kaiming_normal_(self.out.weight)
-        self._initialize_weights()
+        self.out = nn.Linear(32 * features, num_classes)
+        nn.init.kaiming_normal_(self.out.weight)
+        # self._initialize_weights()  # Uncomment for C100, ImageNet
 
     def forward(self, input):
         # 0th layer
@@ -268,7 +496,9 @@ class MobileNet(torch.nn.Module):
     def _initialize_weights(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+                nn.init.kaiming_normal_(
+                    module.weight, mode="fan_out", nonlinearity="relu"
+                )
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, (nn.BatchNorm2d, nn.GroupNorm)):
@@ -280,77 +510,147 @@ class MobileNet(torch.nn.Module):
 
 
 def mbv1_dw_8(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=DWBlock, features=8)
+    return MobileNet(
+        input_shape=input_shape, num_classes=num_classes, conv_block=DWBlock, features=8
+    )
 
 
 def mbv1_dws_8(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=DWSBlock, features=8)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=DWSBlock,
+        features=8,
+    )
 
 
 def mbv1_conv_8(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=ConvBlock, features=8)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=ConvBlock,
+        features=8,
+    )
 
 
 def mbv1_search_8(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=SearchableBlock, features=8)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=SearchableBlock,
+        features=8,
+    )
 
 
 def mbv1_dw_16(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=DWBlock, features=16)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=DWBlock,
+        features=16,
+    )
 
 
 def mbv1_dws_16(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=DWSBlock, features=16)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=DWSBlock,
+        features=16,
+    )
 
 
 def mbv1_conv_16(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=ConvBlock, features=16)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=ConvBlock,
+        features=16,
+    )
 
 
 def mbv1_search_16(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=SearchableBlock, features=16)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=SearchableBlock,
+        features=16,
+    )
 
 
 def mbv1_search_notherm_16(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     thermometric=[False] * 8,
-                     conv_block=SearchableBlock,
-                     features=16)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        thermometric=[False] * 8,
+        conv_block=SearchableBlock,
+        features=16,
+    )
 
 
 def mbv1_dw_32(input_shape: Tuple, num_classes: int, initial_stride: int = 2):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=DWBlock, features=32, initial_stride=initial_stride)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=DWBlock,
+        features=32,
+        initial_stride=initial_stride,
+    )
 
 
 def mbv1_dws_32(input_shape: Tuple, num_classes: int, initial_stride: int = 2):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=DWSBlock, features=32, initial_stride=initial_stride)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=DWSBlock,
+        features=32,
+        initial_stride=initial_stride,
+    )
 
 
 def mbv1_conv_32(input_shape: Tuple, num_classes: int, initial_stride: int = 2):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=ConvBlock, features=32, initial_stride=initial_stride)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=ConvBlock,
+        features=32,
+        initial_stride=initial_stride,
+    )
 
 
 def mbv1_search_32(input_shape: Tuple, num_classes: int, initial_stride: int = 2):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=SearchableBlock, features=32, initial_stride=initial_stride)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=SearchableBlock,
+        features=32,
+        initial_stride=initial_stride,
+    )
+
+
+def mbv1_supernet_32(input_shape: Tuple, num_classes: int, initial_stride: int = 2):
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=SupernetBlock,
+        features=32,
+        initial_stride=initial_stride,
+    )
 
 
 def mbv1_search_32_dw_dws(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=SearchableBlockDwDws, features=32)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=SearchableBlockDwDws,
+        features=32,
+    )
 
 
 def mbv1_search_32_dws_conv(input_shape: Tuple, num_classes: int):
-    return MobileNet(input_shape=input_shape, num_classes=num_classes,
-                     conv_block=SearchableBlockDwsConv, features=32)
+    return MobileNet(
+        input_shape=input_shape,
+        num_classes=num_classes,
+        conv_block=SearchableBlockDwsConv,
+        features=32,
+    )

@@ -53,36 +53,49 @@ class ThermometricCombiner(nn.Module):
     :param binarization_threshold: the binarization threshold for PIT masks, defaults to 0.5
     :type binarization_threshold: float, optional
     """
-    def __init__(self, input_layers: nn.ModuleList, out_channels: int,
-                 thermometric: bool,
-                 init_strategy: Literal['half', '1st', '2nd'] = 'half',
-                 warmup_strategy: Literal['std', 'coarse', 'fine'] = 'std',
-                 binarization_threshold: float = 0.5):
+
+    def __init__(
+        self,
+        input_layers: nn.ModuleList,
+        out_channels: int,
+        thermometric: bool,
+        init_strategy: Literal["half", "1st", "2nd"] = "half",
+        warmup_strategy: Literal["std", "coarse", "fine"] = "std",
+        binarization_threshold: float = 0.5,
+        supernet_ablation: bool = False,
+    ):
         super(ThermometricCombiner, self).__init__()
         self.sn_input_layers = [_ for _ in input_layers]
         self.n_layers = len(input_layers)
         self.out_channels = out_channels
         self.thermometric = thermometric
         self._binarization_threshold = binarization_threshold
+        self.supernet_ablation = supernet_ablation
 
         # Init
         self._init_strategy = init_strategy
-        self.alpha = nn.Parameter(
-            torch.ones(self.out_channels, dtype=torch.float32))
+        if not supernet_ablation:
+            self.alpha = nn.Parameter(
+                torch.ones(self.out_channels, dtype=torch.float32)
+            )
+        else:
+            self.alpha = nn.Parameter(1 / 2 * torch.ones(2, dtype=torch.float32))
         self.init_alpha()
 
         # Cost
-        self._cost = 'naive'
+        self._cost = "naive"
         self.update_cost_fn(cost=self._cost)
 
         # Combiner behavior and phase (initially 'warmup')
-        self._phase = 'warmup'
+        self._phase = "warmup"
         self._warmup_strategy = warmup_strategy
         self.update_combiner_behavior(phase=self.phase, strategy=self.warmup_strategy)
 
         self._norm = self._generate_norm_constants()
-        self.register_buffer('ch_eff', torch.tensor(self.out_channels, dtype=torch.float32))
-        self.register_buffer('_c_alpha', self._generate_c_matrix())
+        self.register_buffer(
+            "ch_eff", torch.tensor(self.out_channels, dtype=torch.float32)
+        )
+        self.register_buffer("_c_alpha", self._generate_c_matrix())
         self.layers_sizes = []
         self.layers_macs = []
 
@@ -97,6 +110,12 @@ class ThermometricCombiner(nn.Module):
         :rtype: torch.Tensor
         """
         bin_theta = self.sample_theta()
+        if self.supernet_ablation:
+            y = []
+            y.append(torch.mul(layers_outputs[0], bin_theta[0]))
+            y.append(torch.mul(layers_outputs[1], bin_theta[1]))
+            y = torch.stack(y, dim=0).sum(dim=0)
+            return y
         # bin_theta = Binarizer.apply(self.theta, self._binarization_threshold)
         # bin_theta_flip = torch.flip(bin_theta, dims=(0,))
         bin_theta_flip = 1 - bin_theta
@@ -113,22 +132,24 @@ class ThermometricCombiner(nn.Module):
 
         return y
 
-    def update_cost_fn(self, cost: Literal['naive', 'darkside', 'darkside-power']):
-        if cost == 'naive':
+    def update_cost_fn(self, cost: Literal["naive", "darkside", "darkside-power"]):
+        if cost == "naive":
             self.cost_fn = cost_naive
             self.use_power = False
-        elif cost == 'darkside':
+        elif cost == "darkside":
             self.cost_fn = cost_darkside
             self.use_power = False
-        elif cost == 'darkside-power':
+        elif cost == "darkside-power":
             self.cost_fn = cost_darkside
             self.use_power = True
         else:
-            raise ValueError(f'{cost} is not supported.')
+            raise ValueError(f"{cost} is not supported.")
 
-    def update_combiner_behavior(self,
-                                 phase: Literal['warmup', 'search'] = 'search',
-                                 strategy: Literal['std', 'coarse', 'fine'] = 'std'):
+    def update_combiner_behavior(
+        self,
+        phase: Literal["warmup", "search"] = "search",
+        strategy: Literal["std", "coarse", "fine"] = "std",
+    ):
         """The behavior of the combiner changes depending on the:
         - The phase (i.e., 'warmup' or 'search').
         - The strategy (i.e., 'std', 'coarse' or 'fine').
@@ -138,52 +159,67 @@ class ThermometricCombiner(nn.Module):
         :param strategy: the warmup granularity, default to 'std'.
         :type strategy: Literal['std', 'coarse', 'fine']
         """
-        if phase == 'warmup':
+        if phase == "warmup":
             # During warmup self.alpha is not trained
             self.alpha.requires_grad = False
             # Update sampling strategy
-            if strategy == 'coarse':
+            if strategy == "coarse":
                 self.sample_theta = self.sample_theta_warmup_coarse
-            elif strategy == 'fine':
+            elif strategy == "fine":
                 self.sample_theta = self.sample_theta_warmup_fine
-            elif strategy == 'std':
+            elif strategy == "std":
                 self.sample_theta = self.sample_theta_search
             else:
-                msg = f'{strategy} is not supported.'
+                msg = f"{strategy} is not supported."
                 msg += ' Supported granularity: "std", "coarse" or "fine".'
                 raise ValueError(msg)
-        elif phase == 'search':
+        elif phase == "search":
             # Reset alpha
             with torch.no_grad():
                 self.init_alpha()
             # During warmup self.alpha is trained
             self.alpha.requires_grad = True
             # Update sampling strategy
-            self.sample_theta = self.sample_theta_search
+            self.sample_theta = (
+                self.sample_theta_search
+                if not self.supernet_ablation
+                else self.sample_theta_search_supernet
+            )
         else:
             msg = f'{phase} is not supported. Supported phase: "warmup" or "search".'
             raise ValueError(msg)
 
     def init_alpha(self):
-        if self.init_strategy == '1st':
+        if self.supernet_ablation:
             with torch.no_grad():
-                self.alpha.data.fill_(1.)
-        elif self.init_strategy == '2nd':
+                self.alpha.data.fill_(0.5)
+            return
+        if self.init_strategy == "1st":
             with torch.no_grad():
-                self.alpha.data.fill_(0.)
-        elif self.init_strategy == 'half':
+                self.alpha.data.fill_(1.0)
+        elif self.init_strategy == "2nd":
+            with torch.no_grad():
+                self.alpha.data.fill_(0.0)
+        elif self.init_strategy == "half":
             # Set half of self.alpha to 0 and other half to 1.
             with torch.no_grad():
-                self.alpha[int(self.out_channels / 2):] = 0.
-                self.alpha[:int(self.out_channels / 2)] = 1.
+                self.alpha[int(self.out_channels / 2) :] = 0.0
+                self.alpha[: int(self.out_channels / 2)] = 1.0
         else:
-            msg = f'{self.init_strategy} is not supported.'
+            msg = f"{self.init_strategy} is not supported."
             msg += 'Supported strategies: "1st", "2nd", "half"'
             raise ValueError(msg)
 
     def sample_theta_warmup_coarse(self) -> torch.Tensor:
+        # if self.supernet_ablation:
+        # return self.alpha
         # Sampling from U[0, 1)
         p = torch.rand(1)
+        if self.supernet_ablation:
+            with torch.no_grad():
+                self.alpha[int(p.ge(0.5))] = 1.0
+                self.alpha[int(p.lt(0.5))] = 0.0
+                return self.alpha
         # Change alpha values accordingly
         self.alpha.fill_(float(p.ge(0.5)))
         # Compute binarized theta
@@ -194,51 +230,65 @@ class ThermometricCombiner(nn.Module):
         device = self.alpha.device  # TODO: define property for device
         cout = self.out_channels
         # Sampling from {0, cout} with equal probability
-        p = torch.randint(0, cout+1, (1,)).item()
+        p = torch.randint(0, cout + 1, (1,)).item()
         if p == 0:
             bin_theta = torch.zeros(cout, device=device)
         elif p == cout:
             bin_theta = torch.ones(cout, device=device)
         else:
-            bin_theta = torch.cat((
-                torch.ones(p, device=device),
-                torch.zeros(cout-p, device=device)
-                ))
+            bin_theta = torch.cat(
+                (torch.ones(p, device=device), torch.zeros(cout - p, device=device))
+            )
         return bin_theta
 
     def sample_theta_search(self) -> torch.Tensor:
+        if self.supernet_ablation:
+            return F.softmax(self.theta, dim=0)
+            # return F.gumbel_softmax(self.theta, dim=0)
         bin_theta = Binarizer.apply(self.theta, self._binarization_threshold)
         return bin_theta
+
+    def sample_theta_search_supernet(self, hard: bool = False) -> torch.Tensor:
+        theta_alpha = F.softmax(self.theta, dim=0)
+        # theta_alpha = F.gumbel_softmax(self.theta, dim=0)
+        if hard:
+            theta_alpha = F.one_hot(
+                torch.argmax(theta_alpha, dim=0), num_classes=len(theta_alpha)
+            ).to(torch.float32)
+        return theta_alpha
 
     def update_input_layers(self, input_layers: nn.Module):
         """Updates the list of input layers after torch.fx tracing, which "explodes" nn.Sequential
         and nn.ModuleList, causing the combiner to wrongly reference to the pre-tracing version.
         """
-        il = [cast(nn.Module, input_layers.__getattr__(str(_))) for _ in range(self.n_layers)]
+        il = [
+            cast(nn.Module, input_layers.__getattr__(str(_)))
+            for _ in range(self.n_layers)
+        ]
         self.sn_input_layers = il
 
     @property
-    def init_strategy(self) -> Literal['1st', '2nd', 'half']:
+    def init_strategy(self) -> Literal["1st", "2nd", "half"]:
         return self._init_strategy
 
     @init_strategy.setter
-    def init_strategy(self, val: Literal['1st', '2nd', 'half']):
+    def init_strategy(self, val: Literal["1st", "2nd", "half"]):
         self._init_strategy = val
 
     @property
-    def phase(self) -> Literal['warmup', 'search']:
+    def phase(self) -> Literal["warmup", "search"]:
         return self._phase
 
     @phase.setter
-    def phase(self, val: Literal['warmup', 'search']):
+    def phase(self, val: Literal["warmup", "search"]):
         self._phase = val
 
     @property
-    def warmup_strategy(self) -> Literal['coarse', 'fine']:
+    def warmup_strategy(self) -> Literal["coarse", "fine"]:
         return self._warmup_strategy
 
     @warmup_strategy.setter
-    def warmup_strategy(self, val: Literal['coarse', 'fine']):
+    def warmup_strategy(self, val: Literal["coarse", "fine"]):
         self._warmup_strategy = val
 
     @property
@@ -253,6 +303,8 @@ class ThermometricCombiner(nn.Module):
         :return: the binary masks
         :rtype: torch.Tensor
         """
+        if self.supernet_ablation:
+            return self.alpha
         if self.thermometric:
             c_alpha = cast(torch.Tensor, self._c_alpha)
             theta_alpha = torch.matmul(c_alpha, torch.abs(self.alpha))
@@ -288,43 +340,44 @@ class ThermometricCombiner(nn.Module):
         # First Layer
         for layer in self.sn_input_layers[0]._modules.values():
             if isinstance(layer, nn.Conv2d):
-                stats = summary(layer, input_shape, verbose=0, mode='eval')
+                stats = summary(layer, input_shape, verbose=0, mode="eval")
                 self.layers_macs.append(stats.total_mult_adds)
         # Second Layer
         # TODO: FIx hard-coding
-        for layer in self.sn_input_layers[1]._modules['depthwise']._modules.values():
+        for layer in self.sn_input_layers[1]._modules["depthwise"]._modules.values():
             if isinstance(layer, nn.Conv2d):
-                stats = summary(layer, input_shape, verbose=0, mode='eval')
+                stats = summary(layer, input_shape, verbose=0, mode="eval")
                 self.layers_macs.append(stats.total_mult_adds)
 
     def register_layers_shapes(self, o_x: int, o_y: int):
-        """Store the shapes of the two layers in two dicts.
-        """
+        """Store the shapes of the two layers in two dicts."""
         # First Layer
         self.layer0_shapes = list()
-        for layer in filter(lambda x: isinstance(x, nn.Conv2d),
-                            self.sn_input_layers[0].modules()):
+        for layer in filter(
+            lambda x: isinstance(x, nn.Conv2d), self.sn_input_layers[0].modules()
+        ):
             shape_dict = dict()
-            shape_dict['o_x'] = o_x
-            shape_dict['o_y'] = o_y
-            shape_dict['c_in'] = layer.in_channels
-            shape_dict['c_out'] = layer.out_channels
-            shape_dict['k_x'] = layer.kernel_size[0]
-            shape_dict['k_y'] = layer.kernel_size[1]
-            shape_dict['groups'] = layer.groups
+            shape_dict["o_x"] = o_x
+            shape_dict["o_y"] = o_y
+            shape_dict["c_in"] = layer.in_channels
+            shape_dict["c_out"] = layer.out_channels
+            shape_dict["k_x"] = layer.kernel_size[0]
+            shape_dict["k_y"] = layer.kernel_size[1]
+            shape_dict["groups"] = layer.groups
             self.layer0_shapes.append(shape_dict)
         # Second Layer
         self.layer1_shapes = list()
-        for layer in filter(lambda x: isinstance(x, nn.Conv2d),
-                            self.sn_input_layers[1].modules()):
+        for layer in filter(
+            lambda x: isinstance(x, nn.Conv2d), self.sn_input_layers[1].modules()
+        ):
             shape_dict = dict()
-            shape_dict['o_x'] = o_x
-            shape_dict['o_y'] = o_y
-            shape_dict['c_in'] = layer.in_channels
-            shape_dict['c_out'] = layer.out_channels
-            shape_dict['k_x'] = layer.kernel_size[0]
-            shape_dict['k_y'] = layer.kernel_size[1]
-            shape_dict['groups'] = layer.groups
+            shape_dict["o_x"] = o_x
+            shape_dict["o_y"] = o_y
+            shape_dict["c_in"] = layer.in_channels
+            shape_dict["c_out"] = layer.out_channels
+            shape_dict["k_x"] = layer.kernel_size[0]
+            shape_dict["k_y"] = layer.kernel_size[1]
+            shape_dict["groups"] = layer.groups
             self.layer1_shapes.append(shape_dict)
 
         # Determine latency_fn depending on the len of layer0_shapes and layer1_shapes
@@ -333,9 +386,15 @@ class ThermometricCombiner(nn.Module):
         elif len(self.layer0_shapes) == 1 and len(self.layer1_shapes) == 2:
             self.latency_fn = self.get_latency_conv_dws
         elif len(self.layer0_shapes) == 1 and len(self.layer1_shapes) == 1:
-            self.latency_fn = self.get_latency_conv_dw
+            self.latency_fn = (
+                self.get_latency_conv_dw
+                if not self.supernet_ablation
+                else self.get_latency_supernet
+            )
         else:
-            raise ValueError("The number of shapes in layer0_shapes and layer1_shapes must be 1 or 2.")
+            raise ValueError(
+                "The number of shapes in layer0_shapes and layer1_shapes must be 1 or 2."
+            )
 
     def get_size(self) -> torch.Tensor:
         """Method that returns the number of weights for the module
@@ -349,8 +408,9 @@ class ThermometricCombiner(nn.Module):
         total_size = self.layers_sizes[0] * self.ch_eff / self.out_channels
         # Second Layer
         # Re-weight layer_size with the number of effective assigned channels
-        total_size = total_size + \
-            (self.layers_sizes[1] * (1 - self.ch_eff / self.out_channels))
+        total_size = total_size + (
+            self.layers_sizes[1] * (1 - self.ch_eff / self.out_channels)
+        )
         return total_size
 
     def get_macs(self) -> torch.Tensor:
@@ -364,8 +424,9 @@ class ThermometricCombiner(nn.Module):
         total_macs = self.layers_macs[0] * self.ch_eff / self.out_channels
         # Second Layer
         # Re-weight layer_size with the number of effective assigned channels
-        total_macs = total_macs + \
-            (self.layers_macs[1] * (1 - self.ch_eff / self.out_channels))
+        total_macs = total_macs + (
+            self.layers_macs[1] * (1 - self.ch_eff / self.out_channels)
+        )
         return total_macs
 
     def get_latency(self) -> torch.Tensor:
@@ -380,9 +441,9 @@ class ThermometricCombiner(nn.Module):
         return lat
 
     def get_latency_dws_dw(self) -> torch.Tensor:
-        self.layer0_shapes[0]['c_out'] = torch.tensor(self.out_channels)
-        self.layer0_shapes[1]['c_out'] = self.ch_eff
-        self.layer1_shapes[0]['c_out'] = self.out_channels - self.ch_eff
+        self.layer0_shapes[0]["c_out"] = torch.tensor(self.out_channels)
+        self.layer0_shapes[1]["c_out"] = self.ch_eff
+        self.layer1_shapes[0]["c_out"] = self.out_channels - self.ch_eff
 
         lat_dw_0 = self.cost_fn(self.layer0_shapes[0])
         lat_pw_0 = self.cost_fn(self.layer0_shapes[1])
@@ -392,9 +453,9 @@ class ThermometricCombiner(nn.Module):
         return lat
 
     def get_latency_conv_dws(self) -> torch.Tensor:
-        self.layer0_shapes[0]['c_out'] = self.ch_eff
-        self.layer1_shapes[0]['c_out'] = torch.tensor(self.out_channels)
-        self.layer1_shapes[1]['c_out'] = self.out_channels - self.ch_eff
+        self.layer0_shapes[0]["c_out"] = self.ch_eff
+        self.layer1_shapes[0]["c_out"] = torch.tensor(self.out_channels)
+        self.layer1_shapes[1]["c_out"] = self.out_channels - self.ch_eff
 
         lat_conv = self.cost_fn(self.layer0_shapes[0])
         lat_dw = self.cost_fn(self.layer1_shapes[0])
@@ -413,7 +474,7 @@ class ThermometricCombiner(nn.Module):
         #                  dtype=torch.float32, device=device)
         #                  )
         # cycles.append(self.layers_macs[0] * self.ch_eff / self.out_channels)
-        self.layer0_shapes[0]['c_out'] = self.ch_eff
+        self.layer0_shapes[0]["c_out"] = self.ch_eff
         cycles.append(self.cost_fn(self.layer0_shapes[0]))
         # Second Layer
         # Re-weight layer_size with the number of effective assigned channels
@@ -422,25 +483,39 @@ class ThermometricCombiner(nn.Module):
         #                  dtype=torch.float32, device=device)
         #                  )
         # cycles.append(self.layers_macs[1] * (1 - self.ch_eff / self.out_channels))
-        self.layer1_shapes[0]['c_out'] = self.out_channels - self.ch_eff
+        self.layer1_shapes[0]["c_out"] = self.out_channels - self.ch_eff
         cycles.append(self.cost_fn(self.layer1_shapes[0]))
 
         # Build tensor of cycles
         # NB: torch.tensor() does not preserve gradients!!!
         t_cycles = torch.stack(cycles)
         # Compute softmax
-        temp = 1e+7
-        # temp = 1
+        # temp = 1e7
+        temp = 1
         s_c = F.softmax(t_cycles / temp, dim=0)
         t_c = torch.dot(s_c, t_cycles)
 
         if self.use_power:
-            p_idle = (POWER_DARKSIDE['IDLE'] * (t_c - t_cycles[0]) +
-                      POWER_DARKSIDE['IDLE'] * (t_c - t_cycles[1]))
-            p_gap8 = POWER_DARKSIDE['GAP8'] * t_cycles[0]
-            p_dwe = POWER_DARKSIDE['DWE'] * t_cycles[1]
+            p_idle = POWER_DARKSIDE["IDLE"] * (t_c - t_cycles[0]) + POWER_DARKSIDE[
+                "IDLE"
+            ] * (t_c - t_cycles[1])
+            p_gap8 = POWER_DARKSIDE["GAP8"] * t_cycles[0]
+            p_dwe = POWER_DARKSIDE["DWE"] * t_cycles[1]
             return p_idle + p_gap8 + p_dwe
 
+        return t_c
+        # return max(cycles)
+
+    def get_latency_supernet(self, hard: bool = False) -> torch.Tensor:
+        device = self.alpha.device
+        cycles = []
+        self.layer0_shapes[0]["c_out"] = torch.tensor(self.out_channels, device=device)
+        cycles.append(self.cost_fn(self.layer0_shapes[0]))
+
+        self.layer1_shapes[0]["c_out"] = torch.tensor(self.out_channels, device=device)
+        cycles.append(self.cost_fn(self.layer1_shapes[0]))
+        t_cycles = torch.stack(cycles)
+        t_c = torch.dot(self.sample_theta(hard=hard), t_cycles)
         return t_c
 
     def get_macs_overhead(self) -> torch.Tensor:
@@ -460,7 +535,11 @@ class ThermometricCombiner(nn.Module):
         :return: the latency
         :rtype: torch.Tensor
         """
-        lat = self.latency_fn()
+        with torch.no_grad():
+            if self.supernet_ablation:
+                lat = self.latency_fn(hard=True)
+                return lat
+            lat = self.latency_fn()
         return lat
 
     def summary(self) -> Dict[str, Any]:
@@ -470,11 +549,15 @@ class ThermometricCombiner(nn.Module):
         :return: a dictionary containing the optimized layer hyperparameter values
         :rtype: Dict[str, Any]
         """
-        with torch.no_grad():
-            bin_theta = Binarizer.apply(self.theta, self._binarization_threshold)
-            # bin_theta_flip = torch.flip(bin_theta, dims=(0,))
-            bin_theta_flip = 1 - bin_theta
-            theta = [bin_theta, bin_theta_flip]
+        if not self.supernet_ablation:
+            with torch.no_grad():
+                bin_theta = Binarizer.apply(self.theta, self._binarization_threshold)
+                # bin_theta_flip = torch.flip(bin_theta, dims=(0,))
+                bin_theta_flip = 1 - bin_theta
+                theta = [bin_theta, bin_theta_flip]
+        else:
+            with torch.no_grad():
+                theta = self.alpha
 
         res = {"supernet_branches": {}}
         for i, branch in enumerate(self.sn_input_layers):
@@ -482,14 +565,16 @@ class ThermometricCombiner(nn.Module):
                 branch_arch = branch.summary()
             else:
                 branch_arch = {}
-            branch_arch['type'] = branch.__class__.__name__
-            branch_arch['theta'] = sum(theta[i])
+            branch_arch["type"] = branch.__class__.__name__
+            branch_arch["theta"] = (
+                sum(theta[i]) if not self.supernet_ablation else theta[i]
+            )
             branch_layers = branch._modules
             for layer_name in branch_layers:
                 layer = cast(nn.Module, branch_layers[layer_name])
                 if hasattr(layer, "summary") and callable(layer.summary):
                     layer_arch = branch_layers[layer_name].summary()
-                    layer_arch['type'] = branch_layers[layer_name].__class__.__name__
+                    layer_arch["type"] = branch_layers[layer_name].__class__.__name__
                     branch_arch[layer_name] = layer_arch
             res["supernet_branches"][f"branch_{i}"] = branch_arch
         return res
@@ -513,7 +598,8 @@ class ThermometricCombiner(nn.Module):
         self.alpha.requires_grad = value
 
     def named_nas_parameters(
-            self, prefix: str = '', recurse: bool = False) -> Iterator[Tuple[str, nn.Parameter]]:
+        self, prefix: str = "", recurse: bool = False
+    ) -> Iterator[Tuple[str, nn.Parameter]]:
         """Returns an iterator over the architectural parameters of this module, yielding
         both the name of the parameter as well as the parameter itself
 
@@ -549,8 +635,9 @@ class ThermometricCombiner(nn.Module):
         :return: the C_alpha matrix as tensor
         :rtype: torch.Tensor
         """
-        c_alpha = torch.triu(torch.ones((self.out_channels, self.out_channels),
-                             dtype=torch.float32))
+        c_alpha = torch.triu(
+            torch.ones((self.out_channels, self.out_channels), dtype=torch.float32)
+        )
         return c_alpha
 
     def _generate_norm_constants(self) -> torch.Tensor:

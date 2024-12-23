@@ -36,17 +36,25 @@ class ThermometricModule(nn.Module):
     :param thermometric: False to disable the thermometric behavior. Default to True.
     :type thermometric: bool
     """
-    def __init__(self,
-                 input_layers: Iterable[nn.Module],
-                 out_channels: int,
-                 thermometric: bool = True):
+
+    def __init__(
+        self,
+        input_layers: Iterable[nn.Module],
+        out_channels: int,
+        thermometric: bool = True,
+        supernet_ablation: bool = False,
+    ):
         if len(list(input_layers)) > 2:
-            msg = 'Currently only selection among two alternatives is supported'
+            msg = "Currently only selection among two alternatives is supported"
             raise ValueError(msg)
         super(ThermometricModule, self).__init__()
         self.sn_input_layers = nn.ModuleList(list(input_layers))
-        self.sn_combiner = ThermometricCombiner(self.sn_input_layers,
-                                                out_channels, thermometric)
+        self.sn_combiner = ThermometricCombiner(
+            self.sn_input_layers,
+            out_channels,
+            thermometric,
+            supernet_ablation=supernet_ablation,
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Forward function for the ThermometricModule that returns a weighted

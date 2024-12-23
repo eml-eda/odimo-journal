@@ -31,6 +31,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -42,6 +43,8 @@ import torchvision.transforms as transforms
 import torchvision
 
 import wandb
+
+from pytorch_benchmarks import hr_detection as hrd
 
 import models as models
 
@@ -57,24 +60,21 @@ model_names = sorted(
     if name.islower() and not name.startswith("__") and callable(models.__dict__[name])
 )
 
-parser = argparse.ArgumentParser(description="PyTorch Cifar Training")
+parser = argparse.ArgumentParser(description="PyTorch Dalia Training")
 parser.add_argument("data", metavar="DIR", help="path to dataset")
 parser.add_argument(
-    "--tiny-test", action="store_true", help="whether to use MLPerf Tiny test-set"
+    "-a",
+    "--arch",
+    metavar="ARCH",
+    default="mixtemponet_pow2_diana_full",
+    choices=model_names,
+    help="model architecture: " + " | ".join(model_names) + " (default: resnet8)",
 )
 parser.add_argument(
     "--arch-data-split",
     type=float,
     default=None,
     help="Split of the data to use for the update of alphas",
-)
-parser.add_argument(
-    "-a",
-    "--arch",
-    metavar="ARCH",
-    default="resnet8",
-    choices=model_names,
-    help="model architecture: " + " | ".join(model_names) + " (default: resnet8)",
 )
 parser.add_argument(
     "-j",
@@ -292,8 +292,9 @@ parser.add_argument(
     action="store_true",
     help="enable additional visualizations useful for debugging",
 )
+parser.add_argument("--subject", default="3", type=str, help="subject to use")
 
-best_acc1 = 0
+best_mae = 0
 
 
 def main():
@@ -361,7 +362,10 @@ def main():
 
 
 def main_worker(gpu, ngpus_per_node, args):
-    global best_acc1
+    global best_mae
+    global best_mae_test
+    best_mae_test = float("inf")
+    mae_test = float("inf")
     args.gpu = gpu
 
     if args.gpu is not None:
@@ -381,79 +385,17 @@ def main_worker(gpu, ngpus_per_node, args):
             rank=args.rank,
         )
 
-    # Data loading code
-    if "cifar100" in args.dataset:
-        raise NotImplementedError
-    elif "cifar10" in args.dataset:
-        num_classes = 10
+    # Get the data
+    data_dir = args.data.parent.parent.parent / "data"
+    data_gen = hrd.get_data(data_dir=data_dir, cross_val=True)
+    for datasets in data_gen:
+        if datasets[2].test_subj == int(args.subject):
+            break
+    dataloaders = hrd.build_dataloaders(datasets, seed=args.seed)
+    train_dl, val_dl, test_dl = dataloaders
 
-        transform_train = transforms.Compose(
-            [
-                transforms.RandomHorizontalFlip(0.5),
-                transforms.RandomCrop(32, 4),
-                transforms.ToTensor(),
-            ]
-        )
-
-        transform_test = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                # transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-            ]
-        )
-
-        # if args.distributed:
-        #     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        # else:
-        #     train_sampler = None
-        train_sampler = None
-
-        data_dir = args.data.parent.parent.parent / "data"
-
-        train_set = torchvision.datasets.CIFAR10(
-            root=data_dir, train=True, download=True, transform=transform_train
-        )
-
-        test_set = torchvision.datasets.CIFAR10(
-            root=data_dir, train=False, download=True, transform=transform_test
-        )
-
-        # Split dataset into train and validation
-        train_len = int(len(train_set) * 0.9)
-        val_len = len(train_set) - train_len
-        # Fix generator seed for reproducibility
-        data_gen = torch.Generator().manual_seed(args.seed)
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            train_set, [train_len, val_len], generator=data_gen
-        )
-
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=(train_sampler is None),
-            num_workers=args.workers,
-            pin_memory=True,
-            sampler=train_sampler,
-        )
-
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.workers,
-            pin_memory=True,
-        )
-
-        if args.tiny_test:
-            _idxs = np.load("perf_samples_idxs.npy")
-            test_set = torch.utils.data.Subset(test_set, _idxs)
-        test_loader = torch.utils.data.DataLoader(
-            test_set,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.workers,
-            pin_memory=True,
-        )
+    # Get max (abs) input val
+    max_inp_val = max(abs(datasets[0].samples.flatten()))
 
     # create model
     print("=> creating model '{}'".format(args.arch))
@@ -465,10 +407,10 @@ def main_worker(gpu, ngpus_per_node, args):
     model_fn = models.__dict__[args.arch]
     model = model_fn(
         args.arch_cfg,
-        num_classes=num_classes,
         alpha_init=args.alpha_init,
         gumbel=args.gumbel_softmax,
         target=args.target,
+        max_inp_val=max_inp_val,
     )
 
     if args.distributed:
@@ -503,7 +445,7 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+    criterion = hrd.get_default_criterion()
 
     # group model/architecture parameters
     params, alpha_params, q_params = [], [], []
@@ -515,12 +457,11 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             params += [param]
 
-    optimizer = torch.optim.SGD(
-        params, args.lr, momentum=args.momentum, weight_decay=args.weight_decay
+    optimizer = torch.optim.Adam(
+        params,
+        args.lr,
     )
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[100, 150], last_epoch=args.start_epoch - 1
-    )
+    scheduler = None
     # arch_optimizer = torch.optim.SGD(alpha_params, args.lra, momentum=args.momentum,
     #                                  weight_decay=args.alpha_decay)
     arch_optimizer = torch.optim.Adam(alpha_params, args.lra)
@@ -554,7 +495,7 @@ def main_worker(gpu, ngpus_per_node, args):
             print("=> no checkpoint found at '{}'".format(args.resume))
 
     if args.evaluate:
-        validate(val_loader, model, criterion, args)
+        validate(val_dl, model, criterion, args)
         return
 
     # print('========= initial architecture =========')
@@ -570,10 +511,10 @@ def main_worker(gpu, ngpus_per_node, args):
     #     print('{}: {}'.format(key, value))
 
     # Search
-    best_epoch, best_acc1, best_acc1_test = train(
-        train_loader,
-        val_loader,
-        test_loader,
+    best_epoch, best_mae, best_mae_test = train(
+        train_dl,
+        val_dl,
+        test_dl,
         model,
         criterion,
         optimizer,
@@ -585,11 +526,11 @@ def main_worker(gpu, ngpus_per_node, args):
         scope="Search",
     )
 
-    best_acc1_val = best_acc1
-    print("Best Acc_val@1 {0} @ epoch {1}".format(best_acc1_val, best_epoch))
+    best_mae_val = best_mae
+    print("Best Acc_mae {0} @ epoch {1}".format(best_mae_val, best_epoch))
 
-    test_acc1 = best_acc1_test
-    print("Test Acc_val@1 {0} @ epoch {1}".format(test_acc1, best_epoch))
+    test_mae = best_mae_test
+    print("Test Acc_val@1 {0} @ epoch {1}".format(test_mae, best_epoch))
 
 
 def train(
@@ -607,8 +548,8 @@ def train(
     scope="Search",
 ):
     best_epoch = args.start_epoch
-    best_acc1 = 0
-    best_acc1_test = 0
+    best_mae = float("inf")
+    best_mae_test = float("inf")
     epoch_wout_improve = 0
     temp = args.temperature
 
@@ -689,7 +630,8 @@ def train(
             )
         print(f"Elapsed Time: {time.time()-t0}")
 
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
         q_scheduler.step()
 
         print("========= architecture =========")
@@ -713,8 +655,8 @@ def train(
             print("{}: {}".format(key, value))
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, epoch, args, temp, scope=scope)
-        acc1_test = validate(
+        mae = validate(val_loader, model, criterion, epoch, args, temp, scope=scope)
+        mae_test = validate(
             test_loader, model, criterion, epoch, args, temp, scope=scope
         )
 
@@ -723,14 +665,14 @@ def train(
             temp = anneal_temperature(temp)
 
         # remember best acc@1 and save checkpoint
-        is_best = acc1 > best_acc1
+        is_best = mae < best_mae
         if is_best:
             best_epoch = epoch
-            best_acc1 = acc1
-            best_acc1_test = acc1_test
+            best_mae = mae
+            best_mae_test = mae_test
             epoch_wout_improve = 0
-            print(f"New best Acc_val: {best_acc1}")
-            print(f"New best Acc_test: {best_acc1_test}")
+            print(f"New best MAE_val: {best_mae}")
+            print(f"New best MAE_test: {best_mae_test}")
         else:
             epoch_wout_improve += 1
             print(f"Epoch without improvement: {epoch_wout_improve}")
@@ -744,8 +686,8 @@ def train(
                     "epoch": epoch + 1,
                     "arch": args.arch,
                     "state_dict": model.state_dict(),
-                    "best_acc1": best_acc1,
-                    "best_acc1_test": best_acc1_test,
+                    "best_mae": best_mae,
+                    "best_mae_test": best_mae_test,
                     "optimizer": optimizer.state_dict(),
                     "arch_optimizer": arch_optimizer.state_dict(),
                 },
@@ -772,7 +714,7 @@ def train(
             print(f"Early stopping at epoch {epoch}")
             break
 
-    return best_epoch, best_acc1, best_acc1_test
+    return best_epoch, best_mae, best_mae_test
 
 
 def train_epoch(
@@ -789,15 +731,14 @@ def train_epoch(
 ):
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
-    losses = AverageMeter("Loss", ":.4e")
+    losses = AverageMeter("Loss", ":2.5f")
     complexity_losses = AverageMeter("CLoss", ":.4e")
-    top1 = AverageMeter("Acc@1", ":6.2f")
-    top5 = AverageMeter("Acc@5", ":6.2f")
+    mae = AverageMeter("MAE", ":2.5f")
     curr_lr = optimizer.param_groups[0]["lr"]
     curr_lra = arch_optimizer.param_groups[0]["lr"]
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, complexity_losses, top1, top5],
+        [batch_time, data_time, losses, complexity_losses, mae],
         prefix="Epoch: [{}/{}]\t"
         "LR: {}\t"
         "LRA: {}\t".format(epoch, args.epochs, curr_lr, curr_lra),
@@ -821,10 +762,9 @@ def train_epoch(
         # task_loss = torch.tensor(0.)
 
         # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        mae_val = F.l1_loss(output, target)
         losses.update(task_loss.item(), images.size(0))
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
+        mae.update(mae_val, images.size(0))
         # complexity penalty
         if args.complexity_decay != 0 and scope == "Search":
             if hasattr(model, "module"):
@@ -857,27 +797,13 @@ def train_epoch(
 
             # pdb.set_trace()
 
-    # Visualization
-    if args.visualization:
-        wandb.log(
-            {
-                scope + "_Epoch": epoch,
-                scope + "_Train/Loss": losses.avg,
-                scope + "_Train/Complexity_Loss": loss_complexity,
-                scope + "_Train/Acc": top1.avg,
-                scope + "_Train/lr": curr_lr,
-                scope + "_Train/lra": curr_lra,
-            }
-        )
-
 
 def validate(val_loader, model, criterion, epoch, args, temp, scope="Search"):
     batch_time = AverageMeter("Time", ":6.3f")
-    losses = AverageMeter("Loss", ":.4e")
-    top1 = AverageMeter("Acc@1", ":6.4f")
-    top5 = AverageMeter("Acc@5", ":6.4f")
+    losses = AverageMeter("Loss", ":2.5f")
+    mae = AverageMeter("MAE", ":2.5f")
     progress = ProgressMeter(
-        len(val_loader), [batch_time, losses, top1, top5], prefix="Test: "
+        len(val_loader), [batch_time, losses, mae], prefix="Test: "
     )
 
     # switch to evaluate mode
@@ -895,10 +821,9 @@ def validate(val_loader, model, criterion, epoch, args, temp, scope="Search"):
             loss = criterion(output, target)
 
             # measure accuracy and record loss
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            mae_val = F.l1_loss(output, target)
             losses.update(loss.item(), images.size(0))
-            top1.update(acc1[0], images.size(0))
-            top5.update(acc5[0], images.size(0))
+            mae.update(mae_val, images.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -908,19 +833,9 @@ def validate(val_loader, model, criterion, epoch, args, temp, scope="Search"):
                 progress.display(i)
 
         # TODO: this should also be done with the ProgressMeter
-        print(f" * Acc@1 {top1.avg} Acc@5 {top5.avg}")
+        print(f" * MAE {mae.avg:.6f}")
 
-    # Visualization
-    if args.visualization:
-        wandb.log(
-            {
-                scope + "_Epoch": epoch,
-                scope + "_Test/Loss": losses.avg,
-                scope + "_Test/Acc": top1.avg,
-            }
-        )
-
-    return top1.avg
+    return mae.avg
 
 
 def save_checkpoint(

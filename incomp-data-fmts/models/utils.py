@@ -51,8 +51,8 @@ def _parent_name(target):
     Splits a qualname into parent path and last atom.
     For example, `foo.bar.baz` -> (`foo.bar`, `baz`)
     """
-    *parent, name = target.rsplit('.', 1)
-    return parent[0] if parent else '', name
+    *parent, name = target.rsplit(".", 1)
+    return parent[0] if parent else "", name
 
 
 # Works for length 2 patterns with 2 modules
@@ -63,7 +63,7 @@ def _matches_module_pattern(pattern, node, modules):
     for expected_type, current_node in zip(pattern, nodes):
         if not isinstance(current_node, fx.Node):
             return False
-        if current_node.op != 'call_module':
+        if current_node.op != "call_module":
             return False
         if not isinstance(current_node.target, str):
             return False
@@ -75,25 +75,31 @@ def _matches_module_pattern(pattern, node, modules):
 
 
 def _replace_node_module(node, modules, new_module):
-    assert(isinstance(node.target, str))
+    assert isinstance(node.target, str)
     parent_name, name = _parent_name(node.target)
     modules[node.target] = new_module
     setattr(modules[parent_name], name, new_module)
 
 
 def adapt_resnet18_statedict(pretrained_sd, model_sd, skip_inp=False):
-    new_dict = {key: val for key, val in model_sd.items()
-                if 'size_product' not in key and 'memory_size' not in key}
-    pretrained_sd = {key: val for key, val in pretrained_sd.items()
-                     if 'size_product' not in key and 'memory_size' not in key}
-    for (item_pretr, item_mdl) in zip(pretrained_sd.items(), new_dict.items()):
+    new_dict = {
+        key: val
+        for key, val in model_sd.items()
+        if "size_product" not in key and "memory_size" not in key
+    }
+    pretrained_sd = {
+        key: val
+        for key, val in pretrained_sd.items()
+        if "size_product" not in key and "memory_size" not in key
+    }
+    for item_pretr, item_mdl in zip(pretrained_sd.items(), new_dict.items()):
         # print(item_prtr[0], item_prtr[1].shape)
         # print(item_mdl[0], item_mdl[1].shape)
         # import pdb; pdb.set_trace()
         if skip_inp:
             skip_inp = False
             continue
-        if 'fc' in item_pretr[0] and 'fc' in item_mdl[0]:
+        if "fc" in item_pretr[0] and "fc" in item_mdl[0]:
             new_dict[item_mdl[0]] = item_pretr[1].view(item_mdl[1].shape)
             continue
         new_dict[item_mdl[0]] = item_pretr[1]
@@ -103,7 +109,7 @@ def adapt_resnet18_statedict(pretrained_sd, model_sd, skip_inp=False):
 def adapt_scale_params(state_dict, model):
     new_dict = copy.deepcopy(state_dict)
     for key in state_dict.keys():
-        if 'scale_param' in key:
+        if "scale_param" in key:
             dim = model.state_dict()[key].shape
             new_dict[key] = state_dict[key].repeat(dim)
 
@@ -121,22 +127,26 @@ def detect_ad_tradeoff(model, dummy_input):
         if node.target in modules.keys():
             if isinstance(modules[node.target], nn.Conv2d):
                 conv = modules[node.target]
-                out_shape = node.meta['tensor_meta'].shape
+                out_shape = node.meta["tensor_meta"].shape
                 ch_in = conv.in_channels
                 ch_out = conv.out_channels
                 k_x = conv.kernel_size[0]
                 k_y = conv.kernel_size[1]
                 out_x = out_shape[-2]
                 out_y = out_shape[-1]
-                analog_func = np.array([
-                    analog_cycles(ch_in, ch, k_x, k_y, out_x, out_y)[1]
-                    for ch in range(1, ch_out+1)])
-                digital_func = np.array([
-                    digital_cycles(ch_in, ch, k_x, k_y, out_x, out_y)[1]
-                    for ch in range(1, ch_out+1)])
-                search_or_not.append(
-                    any((np.flip(analog_func) - digital_func <= 0.))
+                analog_func = np.array(
+                    [
+                        analog_cycles(ch_in, ch, k_x, k_y, out_x, out_y)[1]
+                        for ch in range(1, ch_out + 1)
+                    ]
                 )
+                digital_func = np.array(
+                    [
+                        digital_cycles(ch_in, ch, k_x, k_y, out_x, out_y)[1]
+                        for ch in range(1, ch_out + 1)
+                    ]
+                )
+                search_or_not.append(any((np.flip(analog_func) - digital_func <= 0.0)))
     return search_or_not
 
 
@@ -144,22 +154,21 @@ def fix_ch_prec(model, prec, ch):
     i = 0
     with torch.no_grad():
         for name, module in model.named_modules():
-            if isinstance(module, (qm.QuantMultiPrecConv2d,
-                                   qm2.QuantMultiPrecConv2d)):
+            if isinstance(module, (qm.QuantMultiPrecConv2d, qm2.QuantMultiPrecConv2d)):
                 if module.alpha_weight.shape[0] > 1:
                     idx = module.bits.index(prec)
                     if type(ch) is list:
-                        module.alpha_weight[idx, :ch[i]].fill_(1.)
-                        module.alpha_weight[idx+1, :ch[i]].fill_(0.)
-                        module.alpha_weight[idx, ch[i]:].fill_(0.)
-                        module.alpha_weight[idx+1, ch[i]:].fill_(1.)
+                        module.alpha_weight[idx, : ch[i]].fill_(1.0)
+                        module.alpha_weight[idx + 1, : ch[i]].fill_(0.0)
+                        module.alpha_weight[idx, ch[i] :].fill_(0.0)
+                        module.alpha_weight[idx + 1, ch[i] :].fill_(1.0)
                     elif type(ch) is int:
-                        module.alpha_weight[idx, :ch].fill_(1.)
-                        module.alpha_weight[idx+1, :ch].fill_(0.)
-                        module.alpha_weight[idx, ch:].fill_(0.)
-                        module.alpha_weight[idx+1, ch:].fill_(1.)
+                        module.alpha_weight[idx, :ch].fill_(1.0)
+                        module.alpha_weight[idx + 1, :ch].fill_(0.0)
+                        module.alpha_weight[idx, ch:].fill_(0.0)
+                        module.alpha_weight[idx + 1, ch:].fill_(1.0)
                     else:
-                        raise ValueError(f'Type {type(ch)} is not supported')
+                        raise ValueError(f"Type {type(ch)} is not supported")
                     i += 1
 
 
@@ -172,21 +181,23 @@ def fix_ch_prec_naive(model, speedup):
                     idx = module.bits.index(8)
                     ch_out = module.conv.out_channels
                     ch = math.floor(ch_out / speedup) - 1
-                    module.alpha_weight[idx, :ch].fill_(1.)
-                    module.alpha_weight[idx+1, :ch].fill_(0.)
-                    module.alpha_weight[idx, ch:].fill_(0.)
-                    module.alpha_weight[idx+1, ch:].fill_(1.)
+                    module.alpha_weight[idx, :ch].fill_(1.0)
+                    module.alpha_weight[idx + 1, :ch].fill_(0.0)
+                    module.alpha_weight[idx, ch:].fill_(0.0)
+                    module.alpha_weight[idx + 1, ch:].fill_(1.0)
                 else:
                     continue
-                    raise ValueError(f'Type {type(ch)} is not supported')
+                    raise ValueError(f"Type {type(ch)} is not supported")
                 i += 1
 
 
 # http://tinyurl.com/2p9a22kd <- copied from torch.fx experimental (torch v11.0)
 def fold_bn(model, inplace=False):
-    patterns = [(nn.Conv1d, nn.BatchNorm1d),
-                (nn.Conv2d, nn.BatchNorm2d),
-                (nn.Conv3d, nn.BatchNorm3d)]
+    patterns = [
+        (nn.Conv1d, nn.BatchNorm1d),
+        (nn.Conv2d, nn.BatchNorm2d),
+        (nn.Conv3d, nn.BatchNorm3d),
+    ]
     if not inplace:
         model = copy.deepcopy(model)
     fx_model = fx.symbolic_trace(model)
@@ -215,11 +226,11 @@ def fp_to_q(state_dict):
 
     for name, params in state_dict.items():
         full_name = name
-        name = name.split('.')[-1]
-        if name in ['weight']:
-            name_list = full_name.split('.')
-            name_list.insert(-2, 'mix_weight')
-            new_name = '.'.join(name_list)
+        name = name.split(".")[-1]
+        if name in ["weight"]:
+            name_list = full_name.split(".")
+            name_list.insert(-2, "mix_weight")
+            new_name = ".".join(name_list)
             converted_dict[new_name] = params
 
     return converted_dict
@@ -231,11 +242,11 @@ def fpfold_to_q(state_dict):
 
     for name, params in state_dict.items():
         full_name = name
-        name = name.split('.')[-1]
-        if name in ['weight', 'bias']:
-            name_list = full_name.split('.')
-            name_list.insert(-2, 'mix_weight')
-            new_name = '.'.join(name_list)
+        name = name.split(".")[-1]
+        if name in ["weight", "bias"]:
+            name_list = full_name.split(".")
+            name_list.insert(-2, "mix_weight")
+            new_name = ".".join(name_list)
             converted_dict[new_name] = params
 
     return converted_dict
@@ -244,11 +255,17 @@ def fpfold_to_q(state_dict):
 def init_scale_param(model):
     with torch.no_grad():
         for name, module in model.named_modules():
-            if isinstance(module,
-                          (qm.QuantMultiPrecConv2d,
-                           qm2.QuantMultiPrecConv2d,
-                           qm.SharedMultiPrecConv2d,
-                           qm2.SharedMultiPrecConv2d)):
+            if isinstance(
+                module,
+                (
+                    qm.QuantMultiPrecConv2d,
+                    qm2.QuantMultiPrecConv2d,
+                    qm.SharedMultiPrecConv2d,
+                    qm2.SharedMultiPrecConv2d,
+                    qm2.SharedMixQuantChanConv2d,
+                    qm2.QuantMixChanConv2d,
+                ),
+            ):
                 w = module.conv.weight
                 for submodule in module.mix_weight:
                     nb = submodule.num_bits
@@ -259,8 +276,8 @@ def init_scale_param(model):
                         # Init scale param to have ~50% of weights != 0
                         # init_scale_param = torch.zeros([cout], dtype=torch.float32)
                         init_scale_param = submodule.scale_param
-                        delta = .1
-                        target = .33
+                        delta = 0.1
+                        target = 0.33
                         non_zero_frac = _non_zero_frac(w, init_scale_param, cout)
                         while any(non_zero_frac < target):
                             init_scale_param[non_zero_frac < target] -= delta
@@ -268,7 +285,9 @@ def init_scale_param(model):
                     else:
                         # Init scale param to maximize the quantization range
                         # init_scale_param = torch.log(2 * w.abs().max())
-                        init_scale_param = torch.exp2(torch.floor(torch.log2(2 * w.abs().max())))
+                        init_scale_param = torch.exp2(
+                            torch.floor(torch.log2(2 * w.abs().max()))
+                        )
                         # init_scale_param = torch.log(w.abs().max())
                         submodule.scale_param.data = init_scale_param
 
@@ -278,11 +297,11 @@ def q_to_fp(state_dict):
 
     for name, params in state_dict.items():
         full_name = name
-        name = '.'.join(name.split('.')[-2:])
-        if name in ['conv.weight', 'conv.bias']:
-            name_list = full_name.split('.')
-            name_list.remove('mix_weight')
-            new_name = '.'.join(name_list)
+        name = ".".join(name.split(".")[-2:])
+        if name in ["conv.weight", "conv.bias"]:
+            name_list = full_name.split(".")
+            name_list.remove("mix_weight")
+            new_name = ".".join(name_list)
             converted_dict[new_name] = params
 
     return converted_dict

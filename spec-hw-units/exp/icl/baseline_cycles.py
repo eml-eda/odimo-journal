@@ -21,115 +21,118 @@ import torch
 from odimo.method import ThermometricNet
 from exp.common import models
 
-FREQ = 260e+6
+FREQ = 260e6
 
-device = 'cpu'
+device = "cpu"
 rnd_inp = torch.rand((1, 3, 32, 32), device=device)
 
 # ## Width-Multiplier = 0.25x ## #
-model_fn = models.__dict__['mbv1_search_8']
+model_fn = models.__dict__["mbv1_search_8"]
 model = model_fn((3, 32, 32), 10)
-therm_model = ThermometricNet(model,
-                              input_shape=(3, 32, 32),
-                              init_strategy='1st').to(device)
+therm_model = ThermometricNet(model, input_shape=(3, 32, 32), init_strategy="1st").to(
+    device
+)
 
-therm_model.set_cost(cost='naive')
+therm_model.set_cost(cost="naive")
 therm_model(rnd_inp)
-print(f'mbv1_conv_8 - naive: {therm_model.get_real_latency()}')
+print(f"mbv1_conv_8 - naive: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside')
+therm_model.set_cost(cost="darkside")
 therm_model(rnd_inp)
-print(f'mbv1_conv_8 - darkside: {therm_model.get_real_latency()}')
+print(f"mbv1_conv_8 - darkside: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside-power')
+therm_model.set_cost(cost="darkside-power")
 therm_model(rnd_inp)
-print(f'mbv1_conv_8 - darkside-power: {therm_model.get_real_latency() / FREQ}')
+print(f"mbv1_conv_8 - darkside-power: {therm_model.get_real_latency() / FREQ}")
 
 with torch.no_grad():
     for combiner in therm_model._target_combiners:
         _, layer = combiner
-        layer.alpha.data.fill_(0.)
+        layer.alpha.data.fill_(0.0)
 
-therm_model.set_cost(cost='naive')
+therm_model.set_cost(cost="naive")
 therm_model(rnd_inp)
-print(f'mbv1_dw_8 - naive: {therm_model.get_real_latency()}')
+print(f"mbv1_dw_8 - naive: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside')
+therm_model.set_cost(cost="darkside")
 therm_model(rnd_inp)
-print(f'mbv1_dw_8 - darkside: {therm_model.get_real_latency()}')
+print(f"mbv1_dw_8 - darkside: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside-power')
+therm_model.set_cost(cost="darkside-power")
 therm_model(rnd_inp)
-print(f'mbv1_dw_8 - darkside-power: {therm_model.get_real_latency() / FREQ}')
+print(f"mbv1_dw_8 - darkside-power: {therm_model.get_real_latency() / FREQ}")
 
 # ## Width-Multiplier = 0.5x ## #
-model_fn = models.__dict__['mbv1_search_16']
+model_fn = models.__dict__["mbv1_search_16"]
 model = model_fn((3, 32, 32), 10)
-therm_model = ThermometricNet(model,
-                              input_shape=(3, 32, 32),
-                              init_strategy='1st').to(device)
+therm_model = ThermometricNet(model, input_shape=(3, 32, 32), init_strategy="1st").to(
+    device
+)
 
-therm_model.set_cost(cost='naive')
+therm_model.set_cost(cost="naive")
 therm_model(rnd_inp)
-print(f'mbv1_conv_16 - naive: {therm_model.get_real_latency()}')
+print(f"mbv1_conv_16 - naive: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside')
+therm_model.set_cost(cost="darkside")
 therm_model(rnd_inp)
-print(f'mbv1_conv_16 - darkside: {therm_model.get_real_latency()}')
+print(f"mbv1_conv_16 - darkside: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside-power')
+therm_model.set_cost(cost="darkside-power")
 therm_model(rnd_inp)
-print(f'mbv1_conv_16 - darkside-power: {therm_model.get_real_latency() / FREQ}')
+print(f"mbv1_conv_16 - darkside-power: {therm_model.get_real_latency() / FREQ}")
 
 with torch.no_grad():
     for combiner in therm_model._target_combiners:
         _, layer = combiner
-        layer.alpha.data.fill_(0.)
+        layer.alpha.data.fill_(0.0)
 
-therm_model.set_cost(cost='naive')
+therm_model.set_cost(cost="naive")
 therm_model(rnd_inp)
-print(f'mbv1_dw_16 - naive: {therm_model.get_real_latency()}')
+print(f"mbv1_dw_16 - naive: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside')
+therm_model.set_cost(cost="darkside")
 therm_model(rnd_inp)
-print(f'mbv1_dw_16 - darkside: {therm_model.get_real_latency()}')
+print(f"mbv1_dw_16 - darkside: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside-power')
+therm_model.set_cost(cost="darkside-power")
 therm_model(rnd_inp)
-print(f'mbv1_dw_16 - darkside-power: {therm_model.get_real_latency() / FREQ}')
+print(f"mbv1_dw_16 - darkside-power: {therm_model.get_real_latency() / FREQ}")
 
 # ## Width-Multiplier = 1x ## #
-model_fn = models.__dict__['mbv1_search_32']
+model_fn = models.__dict__["mbv1_search_32"]
 model = model_fn((3, 32, 32), 10)
-therm_model = ThermometricNet(model,
-                              input_shape=(3, 32, 32),
-                              init_strategy='1st').to(device)
+therm_model = ThermometricNet(model, input_shape=(3, 32, 32), init_strategy="1st").to(
+    device
+)
 
-therm_model.set_cost(cost='naive')
+therm_model.set_cost(cost="naive")
 therm_model(rnd_inp)
-print(f'mbv1_conv_32 - naive: {therm_model.get_real_latency()}')
+print(f"mbv1_conv_32 - naive: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside')
+therm_model.set_cost(cost="darkside")
 therm_model(rnd_inp)
-print(f'mbv1_conv_32 - darkside: {therm_model.get_real_latency()}')
+print(f"mbv1_conv_32 - darkside: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside-power')
+therm_model.set_cost(cost="darkside-power")
 therm_model(rnd_inp)
-print(f'mbv1_conv_32 - darkside-power: {therm_model.get_real_latency() / FREQ}')
+print(f"mbv1_conv_32 - darkside-power: {therm_model.get_real_latency() / FREQ}")
 
 with torch.no_grad():
     for combiner in therm_model._target_combiners:
         _, layer = combiner
-        layer.alpha.data.fill_(0.)
+        layer.alpha.data.fill_(0.0)
 
-therm_model.set_cost(cost='naive')
+therm_model.set_cost(cost="naive")
 therm_model(rnd_inp)
-print(f'mbv1_dw_32 - naive: {therm_model.get_real_latency()}')
+print(f"mbv1_dw_32 - naive: {therm_model.get_real_latency()}")
 
-therm_model.set_cost(cost='darkside')
+therm_model.set_cost(cost="darkside")
 therm_model(rnd_inp)
-print(f'mbv1_dw_32 - darkside: {therm_model.get_real_latency()}')
+import pdb
 
-therm_model.set_cost(cost='darkside-power')
+pdb.set_trace()
+print(f"mbv1_dw_32 - darkside: {therm_model.get_real_latency()}")
+
+therm_model.set_cost(cost="darkside-power")
 therm_model(rnd_inp)
-print(f'mbv1_dw_32 - darkside-power: {therm_model.get_real_latency() / FREQ}')
+print(f"mbv1_dw_32 - darkside-power: {therm_model.get_real_latency() / FREQ}")

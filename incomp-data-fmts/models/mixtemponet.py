@@ -1,0 +1,548 @@
+# *----------------------------------------------------------------------------*
+# * Copyright (C) 2022 Politecnico di Torino, Italy                            *
+# * SPDX-License-Identifier: Apache-2.0                                        *
+# *                                                                            *
+# * Licensed under the Apache License, Version 2.0 (the "License");            *
+# * you may not use this file except in compliance with the License.           *
+# * You may obtain a copy of the License at                                    *
+# *                                                                            *
+# * http://www.apache.org/licenses/LICENSE-2.0                                 *
+# *                                                                            *
+# * Unless required by applicable law or agreed to in writing, software        *
+# * distributed under the License is distributed on an "AS IS" BASIS,          *
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   *
+# * See the License for the specific language governing permissions and        *
+# * limitations under the License.                                             *
+# *                                                                            *
+# * Author:  Matteo Risso <matteo.risso@polito.it>                             *
+# *----------------------------------------------------------------------------*
+
+from math import ceil
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from . import utils
+from . import quant_module as qm
+from . import quant_module_pow2 as qm2
+from . import hw_models as hw
+from .quant_temponet import quanttemponet_fp_foldbn
+
+
+__all__ = ["mixtemponet_pow2_diana_full"]
+
+
+class TempConvBlock(nn.Module):
+    """
+    Temporal Convolutional Block composed of one temporal convolutional layer.
+    The block is composed of :
+    - Conv1d layer
+    - ReLU layer
+    - BatchNorm1d layer
+    :param ch_in: Number of input channels
+    :param ch_out: Number of output channels
+    :param k_size: Kernel size
+    :param dil: Amount of dilation
+    :param pad: Amount of padding
+    """
+
+    def __init__(
+        self,
+        conv_func,
+        hw_model,
+        is_searchable,
+        ch_in,
+        ch_out,
+        k_size,
+        dil,
+        pad,
+        bias,
+        bn,
+        fix_qtz=False,
+        target="latency",
+        **kwargs,
+    ):
+        self.bn = bn
+        self.use_bias = bias
+        self.use_bn = bn
+        self.fp = conv_func is qm.FpConv2d
+        super().__init__()
+        if not is_searchable:
+            kwargs["wbits"] = [8]
+        self.tcn = conv_func(
+            hw_model,
+            ch_in,
+            ch_out,
+            kernel_size=k_size,
+            dilation=dil,
+            padding=pad,
+            bias=self.use_bias,
+            groups=1,
+            fix_qtz=fix_qtz,
+            target=target,
+            **kwargs,
+        )
+
+        if self.use_bn:
+            self.bn = nn.BatchNorm2d(num_features=ch_out)
+
+    def forward(self, x, temp, is_hard):
+        x = self.tcn(x, temp, is_hard)
+        if self.use_bn:
+            x = self.bn(x)
+        if self.fp:
+            x = F.relu(x)
+        return x
+
+
+class ConvBlock(nn.Module):
+    """
+    Convolutional Block composed of:
+    - Conv1d layer
+    - AvgPool1d layer
+    - ReLU layer
+    - BatchNorm1d layer
+    :param ch_in: Number of input channels
+    :param ch_out: Number of output channels
+    :param k_size: Kernel size
+    :param s: Amount of stride
+    :param pad: Amount of padding
+    """
+
+    def __init__(
+        self,
+        conv_func,
+        hw_model,
+        is_searchable,
+        ch_in,
+        ch_out,
+        k_size,
+        s,
+        pad,
+        dilation,
+        bias,
+        bn,
+        fix_qtz=False,
+        target="latency",
+        **kwargs,
+    ):
+        self.bn = bn
+        self.use_bias = bias
+        self.use_bn = bn
+        self.fp = conv_func is qm.FpConv2d
+        super(ConvBlock, self).__init__()
+        if not is_searchable:
+            kwargs["wbits"] = [8]
+        self.conv = conv_func(
+            hw_model,
+            ch_in,
+            ch_out,
+            kernel_size=k_size,
+            stride=s,
+            dilation=dilation,
+            padding=pad,
+            bias=self.use_bias,
+            groups=1,
+            fix_qtz=fix_qtz,
+            target=target,
+            **kwargs,
+        )
+        if self.fp:
+            self.pool = nn.AvgPool2d(kernel_size=(2, 1), stride=(2, 1))
+        else:
+            self.pool = qm2.QuantAvgPool2d(
+                kwargs["abits"], kernel_size=(2, 1), stride=(2, 1)
+            )
+        if self.use_bn:
+            self.bn = nn.BatchNorm2d(ch_out)
+
+    def forward(self, x, temp, is_hard):
+        x = self.conv(x, temp, is_hard)
+        x = self.pool(x)
+        if self.use_bn:
+            x = self.bn(x)
+        if self.fp:
+            x = F.relu(x)
+        return x
+
+
+class Regressor(nn.Module):
+    """
+    Regressor block composed of:
+    - Linear layer
+    - ReLU layer
+    - BatchNorm1d layer
+    :param ft_in: Number of input channels
+    :param ft_out: Number of output channels
+    """
+
+    def __init__(
+        self,
+        conv_func,
+        hw_model,
+        is_searchable,
+        ft_in,
+        ft_out,
+        bias,
+        bn,
+        search_fc=None,
+        target="latency",
+        **kwargs,
+    ):
+        self.bn = bn
+        self.use_bias = bias
+        self.use_bn = bn
+        self.fp = conv_func is qm.FpConv2d
+        super().__init__()
+        if not is_searchable:
+            kwargs["wbits"] = [8]
+        self.fc = conv_func(
+            hw_model,
+            ft_in,
+            ft_out,
+            kernel_size=kwargs.pop("kernel_size", (1, 1)),
+            stride=(1, 1),
+            bias=self.use_bias,
+            groups=1,
+            fc=search_fc,
+            target=target,
+            **kwargs,
+        )
+        if self.use_bn:
+            self.bn = nn.BatchNorm2d(num_features=ft_out)
+
+    def forward(self, x, temp, is_hard):
+        x = self.fc(x, temp, is_hard)
+        if self.use_bn:
+            x = self.bn(x)
+        return x
+
+
+class TEMPONet(nn.Module):
+    """
+    TEMPONet architecture:
+    Three repeated instances of TemporalConvBlock and ConvBlock organized as follows:
+    - TemporalConvBlock
+    - ConvBlock
+    Two instances of Regressor followed by a final Linear layer with a single neuron.
+    """
+
+    def __init__(
+        self,
+        conv_func,
+        hw_model,
+        is_searchable,
+        search_fc,
+        bn=True,
+        target="latency",
+        **kwargs,
+    ):
+        if "abits" in kwargs:
+            print("abits: {}".format(kwargs["abits"]))
+        if "wbits" in kwargs:
+            print("wbits: {}".format(kwargs["wbits"]))
+
+        # Parameters
+        self.input_shape = (4, 256)  # default for PPG-DALIA dataset
+        self.dil = [2, 2, 1, 4, 4, 8, 8]
+        self.rf = [5, 5, 5, 9, 9, 17, 17]
+        self.ch = [32, 32, 64, 64, 64, 128, 128, 128, 128, 256, 128]
+
+        self.conv_func = conv_func
+        self.hw_model = hw_model
+        self.search_types = ["fixed", "mixed", "multi"]
+        if search_fc in self.search_types:
+            self.search_fc = search_fc
+        else:
+            self.search_fc = False
+        self.bn = bn
+        self.use_bias = not bn
+        self.target = target
+        super().__init__()
+        self.gumbel = kwargs.get("gumbel", False)
+        self.target = target
+
+        # 1st instance of two TempConvBlocks and ConvBlock
+        k_tcb00 = ceil(self.rf[0] / self.dil[0])
+        self.tcb00 = TempConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[0],
+            ch_in=4,
+            ch_out=self.ch[0],
+            k_size=(k_tcb00, 1),
+            dil=(self.dil[0], 1),
+            pad=(((k_tcb00 - 1) * self.dil[0] + 1) // 2, 0),
+            bias=self.use_bias,
+            bn=self.bn,
+            max_inp_val=kwargs.pop("max_inp_val", 1.0),
+            signed=True,
+            **kwargs,
+        )
+        k_tcb01 = ceil(self.rf[1] / self.dil[1])
+        self.tcb01 = TempConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[1],
+            ch_in=self.ch[0],
+            ch_out=self.ch[1],
+            k_size=(k_tcb01, 1),
+            dil=(self.dil[1], 1),
+            pad=(((k_tcb01 - 1) * self.dil[1] + 1) // 2, 0),
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+        k_cb0 = ceil(self.rf[2] / self.dil[2])
+        self.cb0 = ConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[2],
+            ch_in=self.ch[1],
+            ch_out=self.ch[2],
+            k_size=(k_cb0, 1),
+            s=(1, 1),
+            pad=(((k_cb0 - 1) * self.dil[2] + 1) // 2, 0),
+            dilation=(self.dil[2], 1),
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+
+        # 2nd instance of two TempConvBlocks and ConvBlock
+        k_tcb10 = ceil(self.rf[3] / self.dil[3])
+        self.tcb10 = TempConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[3],
+            ch_in=self.ch[2],
+            ch_out=self.ch[3],
+            k_size=(k_tcb10, 1),
+            dil=(self.dil[3], 1),
+            pad="same",
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+        k_tcb11 = ceil(self.rf[4] / self.dil[4])
+        self.tcb11 = TempConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[4],
+            ch_in=self.ch[3],
+            ch_out=self.ch[4],
+            k_size=(k_tcb11, 1),
+            dil=(self.dil[4], 1),
+            pad="same",
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+        self.cb1 = ConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[5],
+            ch_in=self.ch[4],
+            ch_out=self.ch[5],
+            k_size=(5, 1),
+            s=(2, 1),
+            pad=(2, 0),
+            dilation=(1, 1),
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+
+        # 3td instance of TempConvBlock and ConvBlock
+        k_tcb20 = ceil(self.rf[5] / self.dil[5])
+        self.tcb20 = TempConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[6],
+            ch_in=self.ch[5],
+            ch_out=self.ch[6],
+            k_size=(k_tcb20, 1),
+            dil=(self.dil[5], 1),
+            pad="same",
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+        k_tcb21 = ceil(self.rf[6] / self.dil[6])
+        self.tcb21 = TempConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[7],
+            ch_in=self.ch[6],
+            ch_out=self.ch[7],
+            k_size=(k_tcb21, 1),
+            dil=(self.dil[6], 1),
+            pad="same",
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+        self.cb2 = ConvBlock(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[8],
+            ch_in=self.ch[7],
+            ch_out=self.ch[8],
+            k_size=(5, 1),
+            s=(4, 1),
+            pad=(4, 0),
+            dilation=(1, 1),
+            bias=self.use_bias,
+            bn=self.bn,
+            **kwargs,
+        )
+
+        # 1st instance of regressor
+        self.regr0 = Regressor(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[9],
+            ft_in=self.ch[8],
+            ft_out=self.ch[9],
+            bias=self.use_bias,
+            bn=self.bn,
+            search_fc=self.search_fc,
+            kernel_size=(4, 1),
+            **kwargs,
+        )
+
+        # 2nd instance of regressor
+        self.regr1 = Regressor(
+            conv_func=self.conv_func,
+            hw_model=self.hw_model,
+            is_searchable=is_searchable[10],
+            ft_in=self.ch[9],
+            ft_out=self.ch[10],
+            bias=self.use_bias,
+            bn=self.bn,
+            search_fc=self.search_fc,
+            **kwargs,
+        )
+
+        # Output layer
+        if not is_searchable[11]:
+            kwargs["wbits"] = [8]
+        self.out_neuron = conv_func(
+            hw_model,
+            self.ch[10],
+            1,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+            bias=True,
+            fc=self.search_fc,
+            target=target,
+            **kwargs,
+        )
+
+    def forward(self, input, temp, is_hard):
+        # 1st instance of two TempConvBlocks and ConvBlock
+        x = self.tcb00(input.unsqueeze(3), temp, is_hard)
+        x = self.tcb01(x, temp, is_hard)
+        x = self.cb0(x, temp, is_hard)
+        # 2nd instance of two TempConvBlocks and ConvBlock
+        x = self.tcb10(x, temp, is_hard)
+        x = self.tcb11(x, temp, is_hard)
+        x = self.cb1(x, temp, is_hard)
+        # 3td instance of TempConvBlock and ConvBlock
+        x = self.tcb20(x, temp, is_hard)
+        x = self.tcb21(x, temp, is_hard)
+        x = self.cb2(x, temp, is_hard)
+        # Flatten
+        # x = x.flatten(1)
+        # 1st instance of regressor
+        x = self.regr0(x, temp, is_hard)
+        # 2nd instance of regressor
+        x = self.regr1(x, temp, is_hard)
+        # Output layer
+        x = self.out_neuron(x, temp, is_hard)[:, :, 0, 0]
+        return x
+
+    def complexity_loss(self):
+        loss = torch.tensor(0.0)
+        for m in self.modules():
+            if isinstance(m, self.conv_func):
+                loss = loss + m.complexity_loss()
+        return loss
+
+    def fetch_best_arch(self):
+        sum_cycles, sum_bita, sum_bitw = 0, 0, 0
+        sum_mixcycles, sum_mixbita, sum_mixbitw = 0, 0, 0
+        layer_idx = 0
+        best_arch = None
+        for m in self.modules():
+            if isinstance(m, self.conv_func):
+                outs = m.fetch_best_arch(layer_idx)  # Return tuple
+                layer_arch, cycles, bita, bitw, mixcycles, mixbita, mixbitw = outs
+                if best_arch is None:
+                    best_arch = layer_arch
+                else:
+                    for key in layer_arch.keys():
+                        if key not in best_arch:
+                            best_arch[key] = layer_arch[key]
+                        else:
+                            best_arch[key].append(layer_arch[key][0])
+                sum_cycles += cycles
+                sum_bita += bita
+                sum_bitw += bitw
+                sum_mixcycles += mixcycles
+                sum_mixbita += mixbita
+                sum_mixbitw += mixbitw
+                layer_idx += 1
+        return (
+            best_arch,
+            sum_cycles,
+            sum_bita,
+            sum_bitw,
+            sum_mixcycles,
+            sum_mixbita,
+            sum_mixbitw,
+        )
+
+
+def mixtemponet_pow2_diana_full(arch_cfg_path, target="latency", **kwargs):
+    # NB: 2 bits is equivalent for ternary weights!!
+    # is_searchable = [False] + [True] * 10 + [False]
+    is_searchable = [True] * 12
+    search_model = TEMPONet(
+        qm2.MultiPrecActivConv2d,
+        hw.diana(),
+        is_searchable,
+        search_fc="multi",
+        wbits=[8, 2],
+        abits=[7],
+        bn=False,
+        share_weight=True,
+        target=target,
+        **kwargs,
+    )
+    return _mixtemponet_diana(arch_cfg_path, search_model)
+
+
+def _mixtemponet_diana(arch_cfg_path, search_model):
+    # Check `arch_cfg_path` existence
+    if not Path(arch_cfg_path).exists():
+        print(f"The file {arch_cfg_path} does not exist.")
+        raise FileNotFoundError
+
+    # Get folded pretrained model
+    folded_fp_model = quanttemponet_fp_foldbn(arch_cfg_path)
+    folded_state_dict = folded_fp_model.state_dict()
+
+    # Delete folded model
+    del folded_fp_model
+
+    # Translate folded state dict in a format compatible with searchable layers
+    search_state_dict = utils.fpfold_to_q(folded_state_dict)
+    search_model.load_state_dict(search_state_dict, strict=False)
+
+    # Init quantization scale param
+    utils.init_scale_param(search_model)
+
+    return search_model

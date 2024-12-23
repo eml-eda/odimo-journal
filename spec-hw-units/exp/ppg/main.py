@@ -21,16 +21,15 @@ import argparse
 import copy
 import pathlib
 
-from torchinfo import summary
 import torch
 
-import pytorch_benchmarks.image_classification as icl
+import pytorch_benchmarks.hr_detection as hrd
 from pytorch_benchmarks.utils import seed_all, CheckPoint, EarlyStopping
 
 from odimo.method import ThermometricNet
 
-from exp.common import models
-from exp.common.utils import evaluate, train_one_epoch
+from exp.ppg import models
+from exp.ppg.baseline import evaluate, train_one_epoch
 
 # Simply parse all models' names contained in model file
 model_names = sorted(
@@ -41,14 +40,13 @@ model_names = sorted(
 
 
 def warmup_loop(model, epochs, checkpoint_dir, train_dl, val_dl, test_dl, device):
-    criterion = icl.get_default_criterion()
+    criterion = hrd.get_default_criterion()
     # optimizer = icl.get_default_optimizer(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=1e-4)
     # optimizer = torch.optim.SGD(model.parameters(),
     #                              lr=5e-2, momentum=0.9, weight_decay=5e-4)
-    scheduler = icl.get_default_scheduler(optimizer)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    warmup_checkpoint = CheckPoint(checkpoint_dir, model, optimizer, "max")
+    warmup_checkpoint = CheckPoint(checkpoint_dir, model, optimizer, "min")
     skip_warmup = True
     if (checkpoint_dir / "warmup.ckp").exists():
         warmup_checkpoint.load(checkpoint_dir / "warmup.ckp")
@@ -70,16 +68,15 @@ def warmup_loop(model, epochs, checkpoint_dir, train_dl, val_dl, test_dl, device
                 test_dl,
                 device,
             )
-            scheduler.step()
-            warmup_checkpoint(epoch, metrics["val_acc"])
+            warmup_checkpoint(epoch, metrics["val_mae"])
         warmup_checkpoint.load_best()
         warmup_checkpoint.save(checkpoint_dir / "warmup.ckp")
     val_metrics = evaluate(False, model, criterion, val_dl, device)
     test_metrics = evaluate(False, model, criterion, test_dl, device)
     print("Warmup Best Val Set Loss:", val_metrics["loss"])
-    print("Warmup Best Val Set Accuracy:", val_metrics["acc"])
+    print("Warmup Best Val Set MAE:", val_metrics["mae"])
     print("Warmup Test Set Loss @ Best on Val:", test_metrics["loss"])
-    print("Warmup Test Set Accuracy @ Best on Val:", test_metrics["acc"])
+    print("Warmup Test Set MAE @ Best on Val:", test_metrics["mae"])
 
 
 def search_loop(
@@ -93,7 +90,7 @@ def search_loop(
     test_dl,
     device,
 ):
-    criterion = icl.get_default_criterion()
+    criterion = hrd.get_default_criterion()
     param_dicts = [
         {"params": model.nas_parameters(), "weight_decay": 0},
         {"params": model.net_parameters()},
@@ -101,11 +98,10 @@ def search_loop(
     optimizer = torch.optim.Adam(param_dicts, lr=0.001, weight_decay=1e-4)
     # optimizer = optim.SGD(param_dicts,
     #                       lr=5e-2, momentum=0.9, weight_decay=5e-4)
-    scheduler = icl.get_default_scheduler(optimizer)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     # Set EarlyStop with a patience of 50 epochs and CheckPoint
-    earlystop = EarlyStopping(patience=50, mode="max")
-    search_checkpoint = CheckPoint(checkpoint_dir / "search", model, optimizer, "max")
+    earlystop = EarlyStopping(patience=50, mode="min")
+    search_checkpoint = CheckPoint(checkpoint_dir / "search", model, optimizer, "min")
     skip_search = True
     if (checkpoint_dir / "search.ckp").exists():
         search_checkpoint.load(checkpoint_dir / "search.ckp")
@@ -131,12 +127,11 @@ def search_loop(
             )
 
             if epoch > 5:
-                search_checkpoint(epoch, metrics["val_acc"])
-                if earlystop(metrics["val_acc"]):
+                search_checkpoint(epoch, metrics["val_mae"])
+                if earlystop(metrics["val_mae"]):
                     print(f"Stopping at epoch {epoch}")
                     break
 
-            scheduler.step()
             print("architectural summary:")
             print(model)
             print("model regularization:", model.get_latency())
@@ -149,9 +144,9 @@ def search_loop(
     val_metrics = evaluate(True, model, criterion, val_dl, device)
     test_metrics = evaluate(True, model, criterion, test_dl, device)
     print("Search Best Val Set Loss:", val_metrics["loss"])
-    print("Search Best Val Set Accuracy:", val_metrics["acc"])
+    print("Search Best Val Set MAE:", val_metrics["mae"])
     print("Search Test Set Loss @ Best on Val:", test_metrics["loss"])
-    print("Search Test Set Accuracy @ Best on Val:", test_metrics["acc"])
+    print("Search Test Set MAE @ Best on Val:", test_metrics["mae"])
 
 
 def finetune_loop(
@@ -165,16 +160,15 @@ def finetune_loop(
     ft_again=False,
     ft_scratch=False,
 ):
-    criterion = icl.get_default_criterion()
-    optimizer = icl.get_default_optimizer(model)
+    criterion = hrd.get_default_criterion()
+    optimizer = hrd.get_default_optimizer(model)
     # optimizer = optim.SGD(model.parameters(),
     #                       lr=5e-2, momentum=0.9, weight_decay=5e-4)
-    scheduler = icl.get_default_scheduler(optimizer)
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     # Set EarlyStop with a patience of 50 epochs and CheckPoint
-    earlystop = EarlyStopping(patience=100, mode="max")
+    earlystop = EarlyStopping(patience=50, mode="min")
     finetune_checkpoint = CheckPoint(
-        checkpoint_dir / "finetune", model, optimizer, "max"
+        checkpoint_dir / "finetune", model, optimizer, "min"
     )
     skip_finetune = True
     if (checkpoint_dir / "finetune.ckp").exists():
@@ -204,27 +198,27 @@ def finetune_loop(
             )
 
             if epoch > 5:
-                finetune_checkpoint(epoch, metrics["val_acc"])
-                if earlystop(metrics["val_acc"]):
+                finetune_checkpoint(epoch, metrics["val_mae"])
+                if earlystop(metrics["val_mae"]):
                     print(f"Stopping at epoch {epoch}")
                     break
 
-            scheduler.step()
         finetune_checkpoint.load_best()
         finetune_checkpoint.save(checkpoint_dir / "finetune.ckp")
     val_metrics = evaluate(False, model, criterion, val_dl, device)
     test_metrics = evaluate(False, model, criterion, test_dl, device)
     print("Finetune Best Val Set Loss:", val_metrics["loss"])
-    print("Finetune Best Val Set Accuracy:", val_metrics["acc"])
+    print("Finetune Best Val Set MAE:", val_metrics["mae"])
     print("Finetune Test Set Loss @ Best on Val:", test_metrics["loss"])
-    print("Finetune Test Set Accuracy @ Best on Val:", test_metrics["acc"])
+    print("Finetune Test Set MAE @ Best on Val:", test_metrics["mae"])
 
 
 def main(args):
-    DATA_DIR = args.data_dir
+    DATA_DIR = pathlib.Path(args.data_dir)
     CHECKPOINT_DIR = pathlib.Path(args.checkpoint_dir)
     N_EPOCHS = args.epochs
     LAMBDA = torch.tensor(args.strength)
+    SUBJECT = int(args.subject)
 
     # Check CUDA availability
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -234,15 +228,17 @@ def main(args):
     seed_all(seed=args.seed)
 
     # Get the Data
-    data_dir = DATA_DIR
-    datasets = icl.get_data(data_dir=data_dir, val_split=0.1)
-    dataloaders = icl.build_dataloaders(datasets)
+    data_dir = pathlib.Path(DATA_DIR)
+    data_gen = hrd.get_data(data_dir=data_dir, cross_val=True)
+    for datasets in data_gen:
+        if datasets[2].test_subj == SUBJECT:
+            break
+    dataloaders = hrd.build_dataloaders(datasets, seed=args.seed)
     train_dl, val_dl, test_dl = dataloaders
-    input_shape = datasets[0][0][0].numpy().shape
 
     # Get and build the Model
     model_fn = models.__dict__[args.arch]
-    model = model_fn(input_shape, 10)
+    model = model_fn()
     model = model.to(device)
 
     # Model Summary
@@ -254,16 +250,16 @@ def main(args):
         state_dict = torch.load(args.pretrained_model)["model_state_dict"]
         model.load_state_dict(state_dict)
         # Eval
-        criterion = icl.get_default_criterion()
+        criterion = hrd.get_default_criterion()
         pretrained_metrics = evaluate(False, model, criterion, test_dl, device)
-        print("Pretrained Test Set Accuracy:", pretrained_metrics["acc"])
+        print("Pretrained Test Set MAE:", pretrained_metrics["mae"])
 
     # Warmup Phase
     if args.warmup:
         # Convert the model to ThermometricNet
         therm_model = ThermometricNet(
             model,
-            input_shape=input_shape,
+            input_shape=(4, 256),
             cost=args.cost,
             init_strategy=args.init_strategy,
             warmup_strategy=args.warmup_strategy,
@@ -427,5 +423,6 @@ if __name__ == "__main__":
         help="Whether to perform again finetune",
     )
     parser.add_argument("--seed", type=int, default=14, help="Random Seed")
+    parser.add_argument("--subject", default="3", type=str, help="subject to use")
     args = parser.parse_args()
     main(args)

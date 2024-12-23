@@ -1,5 +1,5 @@
 # *----------------------------------------------------------------------------*
-# * Copyright (C) 2022 Politecnico di Torino, Italy                            *
+# * Copyright (C) 2023 Politecnico di Torino, Italy                            *
 # * SPDX-License-Identifier: Apache-2.0                                        *
 # *                                                                            *
 # * Licensed under the Apache License, Version 2.0 (the "License");            *
@@ -17,9 +17,46 @@
 # * Author:  Matteo Risso <matteo.risso@polito.it>                             *
 # *----------------------------------------------------------------------------*
 
-from .mixmobilenetv1 import *  # noqa
-from .mixresnet import *  # noqa
-from .mixtemponet import *  # noqa
-from .quant_mobilenetv1 import *  # noqa
-from .quant_resnet import *  # noqa
-from .quant_temponet import *  # noqa
+import torch
+from odimo.method import ThermometricNet
+from exp.ppg import models
+
+FREQ = 260e6
+
+device = "cpu"
+rnd_inp = torch.rand((1, 4, 256), device=device)
+
+model_fn = models.__dict__["temponet_search"]
+model = model_fn()
+therm_model = ThermometricNet(model, input_shape=(4, 256), init_strategy="1st").to(
+    device
+)
+
+therm_model.set_cost(cost="naive")
+therm_model(rnd_inp)
+print(f"mbv1_conv_32 - naive: {therm_model.get_real_latency()}")
+
+therm_model.set_cost(cost="darkside")
+therm_model(rnd_inp)
+print(f"mbv1_conv_32 - darkside: {therm_model.get_real_latency()}")
+
+therm_model.set_cost(cost="darkside-power")
+therm_model(rnd_inp)
+print(f"mbv1_conv_32 - darkside-power: {therm_model.get_real_latency() / FREQ}")
+
+with torch.no_grad():
+    for combiner in therm_model._target_combiners:
+        _, layer = combiner
+        layer.alpha.data.fill_(0.0)
+
+therm_model.set_cost(cost="naive")
+therm_model(rnd_inp)
+print(f"mbv1_dw_32 - naive: {therm_model.get_real_latency()}")
+
+therm_model.set_cost(cost="darkside")
+therm_model(rnd_inp)
+print(f"mbv1_dw_32 - darkside: {therm_model.get_real_latency()}")
+
+therm_model.set_cost(cost="darkside-power")
+therm_model(rnd_inp)
+print(f"mbv1_dw_32 - darkside-power: {therm_model.get_real_latency() / FREQ}")
