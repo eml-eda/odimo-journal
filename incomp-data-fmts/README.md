@@ -58,33 +58,31 @@ The DIANA latency models take into account the cycles required for loading weigh
 
 Considering a Convolutional layer, without loss of generality, the latency model for the digital accelerator is:
 
-$$
-    LAT_{dig}^{(l)}(\theta) = \lceil \frac{C_{out, dig}^{(l)}(\theta)}{16} \rceil \lceil \frac{o_y^{(l)}}{16} \rceil \times C_{in}^{(l)} \times o_x^{(l)} \times f_x^{(l)} \times f_y^{(l)} + \\
-                    C_{in}^{(l)} \times C_{out, dig}^{(l)}(\theta) \times f_x^{(l)} \times f_y^{(l)}
-$$
-where $C_{in}^{(l)}$, $o_x^{(l)}$/$o_y^{(l)}$ and $f_x^{(l)}$/$f_y^{(l)}$ are the layer's input channels, output spatial dimensions, and kernel sizes respectively. $C_{out, dig}^{(l)}$ is the number of output channels assigned by ODiMO to the digital CU (as a function of the learned $\theta$ parameters). The two addends in the latency model simply compute the number of MAC and DMA cycles respectively, where the former considers the spatial parallelism of the accelerator (16x16 PEs).
+$$LAT_{dig}^{(l)}(\theta) = \lceil \frac{C_{out, dig}^{(l)}(\theta)}{16} \rceil \lceil \frac{o_y^{(l)}}{16} \rceil \times C_{in}^{(l)} \times o_x^{(l)} \times f_x^{(l)} \times f_y^{(l)} + \\
+                    C_{in}^{(l)} \times C_{out, dig}^{(l)}(\theta) \times f_x^{(l)} \times f_y^{(l)}$$
+                    
+where $C_{in}^{(l)}$, $o_x^{(l)}$ / $o_y^{(l)}$ and $f_x^{(l)}$ / $f_y^{(l)}$ are the layer's input channels, output spatial dimensions, and kernel sizes respectively. $C_{out, dig}^{(l)}$ is the number of output channels assigned by ODiMO to the digital CU (as a function of the learned $\theta$ parameters). The two addends in the latency model simply compute the number of MAC and DMA cycles respectively, where the former considers the spatial parallelism of the accelerator (16x16 PEs).
 
 The model for the AIMC CU is:
-$$
-    LAT_{aimc}^{(l)}(\theta) = \lceil \frac{C_{in}^{(l)} \times f_x^{(l)} \times f_y^{(l)}}{1152} \rceil \lceil \frac{C_{out, aimc}^{(l)}(\theta)}{512} \rceil \times o_x^{(l)} \times o_y^{(l)}  \\ +
-                      2 \times 4 \times C_{in}^{(l)} \times \lceil \frac{C_{out, aimc}^{(l)}(\theta)}{512} \rceil
-$$
-also in this case the first term models the number of MAC operations as function of the CU's parallelism (1152$\times$512) and the second one accounts for DMA cycles.
+
+$$LAT_{aimc}^{(l)}(\theta) = \lceil \frac{C_{in}^{(l)} \times f_x^{(l)} \times f_y^{(l)}}{1152} \rceil \lceil \frac{C_{out, aimc}^{(l)}(\theta)}{512} \rceil \times o_x^{(l)} \times o_y^{(l)}  \\ +
+                      2 \times 4 \times C_{in}^{(l)} \times \lceil \frac{C_{out, aimc}^{(l)}(\theta)}{512} \rceil$$
+                      
+also in this case the first term models the number of MAC operations as function of the CU's parallelism (1152 $\times$ 512) and the second one accounts for DMA cycles.
 
 The two detailed latency models can be used to build the energy consumption optimization target of Eq. 4 of the paper. In particular, we only need the average power consumption of the two CUs when active and idle. Then, for a single layer $l$, and making the dependency from $\theta$ implicity for clarity, the regularization target becomes:
-$$
-    \mathcal{C}_{en} = \: P_{act, \: dig} \cdot LAT_{dig} + P_{act, \: ana} \cdot LAT_{ana} \\
-    + P_{idle} \cdot \max(LAT_{dig}, LAT_{ana})
-$$
+
+$$C_{en} = P_{act, \: dig} \cdot LAT_{dig} + P_{act, \: ana} \cdot LAT_{ana} + P_{idle} \cdot \max(LAT_{dig}, LAT_{ana})$$
+    
 The overall regularization term of the DNN will be obtained by summing a contribution in this form  for each layer $l$.
 
 # Training Protocol
 Here, we detail how the general training protocol introduced in Sec. IV of the paper is customized for the case of DIANA.
 The Warmup consists of training the given DNN in floating-point. Then, since the DIANA accelerators do not implement Batch Normalization (BN) in hardware, the BN layers are folded with Conv/FC.
 To simulate the effect of quantization during the optimization, we follow the scheme of [FQ-Conv](https://arxiv.org/abs/1912.09356):
-$$
-    Q(x) = \frac{e^{s}}{2^{n-1}-1} \cdot \mathrm{round}(2^{n-1} - 1 \cdot \mathrm{clip}(x, -1, 1))
-$$
+
+$$Q(x) = \frac{e^{s}}{2^{n-1}-1} \cdot \mathrm{round}(2^{n-1} - 1 \cdot \mathrm{clip}(x, -1, 1))$$
+
 where $s$ is a trainable scale parameter and $n$ is the bit-width.
 With reference to above equation, we use $n=8$ for the digital accelerator weights, while $n = 2$ is used to perform ternarization i.e., the quantization format of DIANA's AIMC accelerator weights. Concerning activations, the AIMC and digital blocks have slightly different formats on 7- and 8-bit respectively. During the optimization phase, we use the worst case of the two (7-bit) as fake-quantization bit-width for layers' inputs/outputs.
 As long as the DNN is appropriately fine-tuned (see below), we found this approximation not to degrade our results.
